@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
-from agent import planner_agent
+from planner_agent import planner_agent
+from browser_agent import BrowserExecutor, ExecutorResult
 from formats_pydantic import Run, PlanOutput, TaskSpec
 from render_todo import render_todo
 from time import time
@@ -10,10 +11,9 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not set in environment variables")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+MODEL = os.getenv("MODEL")
 
 def make_workspace(workspace_path):
     os.makedirs(workspace_path)
@@ -105,11 +105,17 @@ def planner(run: Run) -> PlanOutput:
     planner_run = planner_agent.run_sync(user_prompt=replan_prompt)
     return planner_run.output
     
-def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str]) -> str:
+def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], workspace: Path) -> str:
 
     match task_spec.agent:
         case "browser":
-            ...
+            browser = BrowserExecutor( workspace=workspace, model=MODEL, headless=True)
+            browser_result = browser.run(
+                query=task_spec.query,
+                expects=task_spec.expects,
+                dep_files=dep_files
+            )
+            task_spec.status = "dispatched"
         case "office":
             ...
         case "document_answering":
