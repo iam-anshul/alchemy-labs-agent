@@ -1,7 +1,37 @@
 from browser_use import Agent, Tools, Browser, ChatOpenAI
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from pydantic import BaseModel
+from openai import AsyncOpenAI
 from orchestrator import OPENAI_BASE_URL, OPENAI_KEY
+
+
+@dataclass
+class QwenChatOpenAI(ChatOpenAI):
+    """ChatOpenAI variant that injects extra_body into every chat.completions
+    call. DashScope's Qwen3 models default to thinking-mode-on, which leaves
+    the OpenAI-compatible `content` field empty (the answer lands in
+    `reasoning_content` instead). browser-use only reads `content` and fails
+    to parse `""` as JSON. browser-use's ChatOpenAI doesn't forward
+    extra_body, so we patch it onto the OpenAI client here.
+    """
+    enable_thinking: bool = False
+
+    def get_client(self) -> AsyncOpenAI:
+        client = super().get_client()
+        original = client.chat.completions.create
+        enable_thinking = self.enable_thinking
+
+        @wraps(original)
+        async def patched(*args, **kwargs):
+            extra = dict(kwargs.get("extra_body") or {})
+            extra.setdefault("enable_thinking", enable_thinking)
+            kwargs["extra_body"] = extra
+            return await original(*args, **kwargs)
+
+        client.chat.completions.create = patched
+        return client
 
 
 class ExecutorResult(BaseModel):
@@ -45,7 +75,7 @@ class BrowserExecutor:
             downloads_path=str(self.workspace / "outputs"),
         )
 
-        browser_llm = ChatOpenAI(
+        browser_llm = QwenChatOpenAI(
             model=self.model,
             base_url=OPENAI_BASE_URL,
             api_key=OPENAI_KEY,
