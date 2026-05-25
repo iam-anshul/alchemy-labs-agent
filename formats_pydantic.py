@@ -6,22 +6,13 @@ class TaskSpec(BaseModel):
     id: str
     title: str
     agent: Literal["browser", "office", "document_answering"]
-    deps: list[TaskSpec] = Field(default_factory=list)
+    deps: list[str] = Field(default_factory=list) # refrences by id
     query: str
     expects: str
     produced: list[str] = Field(default_factory=list)
     status: Literal["pending", "dispatched", "completed", "failed"] = "pending"
-    notes: str = Field(
-        default="",
-        description="filled in by the control loop from the executor's submit notes. It isfree-form text the executor wanted the planner to see"
-        )
-
-class ProducedFile(BaseModel):
-    path: str       # relative path under the workspace, e.g. "outputs/t1_sources.md"
-    content: str    # the contents to write to that path
-
-class BrowserTaskOutput(BaseModel):
-    produced: list[ProducedFile] = Field(default_factory=list)
+    notes: str = ""
+    error: str = ""
 
 class PlanOutput(BaseModel):
     tasks: list[TaskSpec]
@@ -31,11 +22,6 @@ class PlanOutput(BaseModel):
         description="Optional free-form notes the planner appends when replanning, explaining what changed and why." \
         "Notes is the planner's scratchpad. It's free-form text the planner writes to itself across calls, explaining decisions."
     )
-
-class PlanRevision(BaseModel):
-    decision: Literal["continue", "revise"]
-    revised_tasks: list[TaskSpec] = []   # only populated if decision == "revise"
-    notes_to_append: str = ""             # appended to the Notes section
 
 class Run(BaseModel):
     user_query: str        # the raw user input that kicked off the run

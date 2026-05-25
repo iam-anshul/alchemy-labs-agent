@@ -1,11 +1,12 @@
 import os
 from pathlib import Path
-from planner_agent import planner_agent
+from orchestrator import plannerAgent
 from browser_agent import BrowserExecutor, ExecutorResult
 from formats_pydantic import Run, PlanOutput, TaskSpec
 from render_todo import render_todo
 from time import time
 import random
+import asyncio
 
 from dotenv import load_dotenv
 import os
@@ -81,7 +82,7 @@ def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
             t.produced = old_by_id[t.id].produced
     return new
     
-def planner(run: Run) -> PlanOutput:
+async def planner(run: Run) -> PlanOutput:
     """Run the planner LLM.
 
     Initial call (no plan on the run yet): generate the plan from the
@@ -91,7 +92,7 @@ def planner(run: Run) -> PlanOutput:
     or a revised version.
     """
     if not run.plan:
-        planner_run = planner_agent.run_sync(user_prompt=run.goal)
+        planner_run = await plannerAgent.run(user_prompt=run.goal)
         return planner_run.output
 
     current_todo = render_todo(run)
@@ -102,35 +103,24 @@ def planner(run: Run) -> PlanOutput:
         "warrant a change, return the revised plan. Otherwise return the "
         "plan unchanged."
     )
-    planner_run = planner_agent.run_sync(user_prompt=replan_prompt)
+    planner_run = await plannerAgent.run(user_prompt=replan_prompt)
     return planner_run.output
     
-def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], workspace: Path) -> str:
+async def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], workspace: Path) -> str:
 
     match task_spec.agent:
         case "browser":
             browser = BrowserExecutor( workspace=workspace, model=MODEL, headless=True)
-            browser_result = browser.run(
+            browser_result = await browser.run(
                 query=task_spec.query,
                 expects=task_spec.expects,
                 dep_files=dep_files
             )
-            task_spec.status = "dispatched"
+            return browser_result
         case "office":
             ...
         case "document_answering":
             ...
-
-def write_file(path: Path | str, content: str) -> None:
-    """Write content to a path under the workspace, creating parent dirs as needed.
-
-    The executor returns its outputs as (path, content) pairs; the control
-    loop calls this once per produced file to materialize them on disk.
-    UTF-8 text only — binary outputs (PDFs, xlsx, etc.) are not handled here.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
 
 def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bool, str]:
     """Verify each produced path exists under the workspace and is non-empty.
@@ -149,7 +139,7 @@ def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bo
             return False, f"File {rel_path!r} exists but is empty: {full_path}"
     return True, "All produced files exist and are non-empty"
 
-def main():
+async def main():
     userGoal = input("What's your goal: ")
     workspace = make_workspace(f"{Path.cwd()}/workspace/{random.randint(0, 99)}{userGoal[:10]}")
 
@@ -163,7 +153,7 @@ def main():
             plan=None
         )
     
-    thisRun.plan = planner(thisRun)
+    thisRun.plan = await planner(thisRun)
 
     # write todo
     write_todo_atomic(thisRun)
@@ -173,47 +163,55 @@ def main():
             break
             
         ready = []    
+        tasks_by_id = {t.id: t for t in thisRun.plan.tasks}
 
         for task in thisRun.plan.tasks:
             if task.status == "pending":
-                deps_done = True
-
-                for dep in task.deps:
-                    if dep.status != "completed":
-                        deps_done = False
-                        break
-                
-                if deps_done:
+                if all(tasks_by_id[dep].status == "completed" for dep in task.deps):
                     ready.append(task)
         
         if not ready:
             # Either deadlocked or waiting on running tasks.
             # In a parallel version this is where you'd join on a running task.
-            raise RuntimeError("Nothing ready and nothing running")
+            # No pending task can run — every remaining pending task is blocked
+            # by a failed upstream. Mark them and exit.
+            
+            #raise RuntimeError("Nothing ready and nothing running")
+            for t in thisRun.plan.tasks:
+                if t.status == "pending":
+                    t.status = "failed"
+                    t.error = "upstream task failed"
+            write_todo_atomic(thisRun)
+            break
         
         for task in ready:
             task.status = "dispatched"
             dep_files = []
             for dep in task.deps:
-                dep_files.extend(task.produced)
+                dep_files.extend(dep.produced)
 
-            result = dispatch_executor_agent(task, dep_files)
-
-            # materialize each produced file the executor reported
-            for pf in result.produced:
-                write_file(f"{workspace}/{pf.path}", pf.content)
-
-            # then verify each path exists and is non-empty
-            ok, status = validate_files_exist(workspace, [pf.path for pf in result.produced])
-            if not ok:
-                raise RuntimeError(status)
-            task.status = "completed"
-            task.produced = [pf.path for pf in result.produced]
+            result = await dispatch_executor_agent(task, dep_files, Path(workspace))
+            if result.error:
+                task.status = "failed"
+                task.error = result.error
+                continue
+            else:
+                # files were written by the executor's write_file tool during
+                # its run; we only verify they exist and are non-empty.
+                ok, status = validate_files_exist(workspace, result.produced)
+                if not ok:
+                    raise RuntimeError(status)
+                task.status = "completed"
+                task.produced = result.produced
+                task.notes = result.notes
 
             # ask the planner whether the plan needs revision, but only while
             # we still have replan budget
+            # persist *and* replan regardless of success/failure — a failure is
+            # exactly when the planner most needs to see the state and decide
+            # whether to revise.
             if thisRun.replans_used < thisRun.replan_budget:
-                new_plan = planner(thisRun)
+                new_plan = await planner(thisRun)
                 if _plan_signature(new_plan) != _plan_signature(thisRun.plan):
                     thisRun.plan = _merge_plan(thisRun.plan, new_plan)
                     thisRun.replans_used += 1
@@ -223,4 +221,4 @@ def main():
     
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

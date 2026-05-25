@@ -1,3 +1,4 @@
 pydantic-ai
 pydantic
 browser-use
+playwright
