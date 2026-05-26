@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from orchestrator import plannerAgent
 from browser_agent import BrowserExecutor, ExecutorResult
+from office_agent import run_office_executor
 from formats_pydantic import Run, PlanOutput, TaskSpec
 from render_todo import render_todo
 from time import time
@@ -118,7 +119,13 @@ async def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], wor
             )
             return browser_result
         case "office":
-            ...
+            office_result = await run_office_executor(
+                workspace=workspace,
+                query=task_spec.query,
+                expects=task_spec.expects,
+                dep_files=dep_files
+                )
+            return office_result
         case "document_answering":
             ...
 
