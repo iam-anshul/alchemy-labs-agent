@@ -1,0 +1,6 @@
+Location: New York, NY, USA
+Time: Tuesday, 4:00 am
+Condition: Partly cloudy
+Temperature: 18°C
+Humidity: 76%
+Wind Speed: 10 km/h
