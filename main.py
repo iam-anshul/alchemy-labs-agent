@@ -17,27 +17,15 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL")
 
+# How many times to dispatch a task before marking it failed. Each attempt
+# builds a fresh executor (and, for browser tasks, a fresh browser), so a retry
+# sidesteps a wedged session rather than re-poking it. This catches transient
+# failures (a one-off hang, a flaky page) without spending a replan.
+MAX_DISPATCH_ATTEMPTS = 3
+
 def make_workspace(workspace_path):
     os.makedirs(workspace_path)
     return workspace_path
-
-"""
-def dummy_planner(current_todo: str, user_goal: str | None) -> str:
-    # First call: no todo yet, just a goal. Return the initial plan.
-    if not current_todo.strip() or "## [" not in current_todo:
-        
-        return INITIAL_TODO.format(
-            goal=user_goal,
-            workspace="/workspace/run_dummy/",
-            timestamp="2026-05-21T10:14:00Z",
-        )
-    # Every later call: no replanning, just return the file unchanged.
-    # (A real planner would inspect the file and decide.)
-    if "[x] t1" in current_todo and "[x] t2" in current_todo and "[x] t3" in current_todo:
-        # All done — append a summary.
-        return current_todo + "\n\n# Summary\nAll three tasks completed.\n"
-    return current_todo
-"""
 
 def write_todo_atomic(run: Run) -> None:
     todo_path = Path(run.workspace) / "todo.md"
@@ -77,10 +65,34 @@ def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
     produced over from the old plan for any task id that survives.
     """
     old_by_id = {t.id: t for t in old.tasks}
+    # for t in new.tasks:
+    #     if t.id in old_by_id:
+    #         t.status = old_by_id[t.id].status
+    #         t.produced = old_by_id[t.id].produced
+    # return new
+
     for t in new.tasks:
         if t.id in old_by_id:
-            t.status = old_by_id[t.id].status
-            t.produced = old_by_id[t.id].produced
+            old_t = old_by_id[t.id]
+            rewritten = (t.query, t.expects, t.agent) != (old_t.query, old_t.expects, old_t.agent)
+            if old_t.status == "failed" and rewritten:
+                # planner changed approach for a failed task -> let it run again.
+                # The old error/notes describe the abandoned approach, so clear
+                # them; the task starts fresh.
+                t.status = "pending"
+                t.produced = []
+                t.error = ""
+                t.notes = ""
+            else:
+                # Preserve all control-loop-owned state. error and notes must be
+                # carried too, or they're wiped on every replan — a failed task's
+                # diagnostic would vanish before a second replan, and the planner
+                # could re-propose the same doomed plan having forgotten why it
+                # failed.
+                t.status = old_t.status
+                t.produced = old_t.produced
+                t.error = old_t.error
+                t.notes = old_t.notes
     return new
     
 async def planner(run: Run) -> PlanOutput:
@@ -97,9 +109,26 @@ async def planner(run: Run) -> PlanOutput:
         return planner_run.output
 
     current_todo = render_todo(run)
+
+    # Executor errors are deliberately NOT rendered into todo.md (that file is
+    # user-facing; raw failure diagnostics would only clutter it). We surface
+    # them to the planner here instead, on a separate internal channel, so it
+    # can decide whether to re-route a failed task — without the user seeing it.
+    failures = [
+        f"- {t.id} ({t.title}): {t.error}"
+        for t in run.plan.tasks
+        if t.status == "failed" and t.error
+    ]
+    failure_section = (
+        "\n\nExecutor failure details (internal — not shown to the user). Use "
+        "these to decide whether a failed task should be re-routed with a "
+        "different approach, and avoid re-proposing an approach that already "
+        "failed for the stated reason:\n" + "\n".join(failures)
+    ) if failures else ""
+
     replan_prompt = (
         f"Goal: {run.goal}\n\n"
-        f"Current plan state:\n\n{current_todo}\n\n"
+        f"Current plan state:\n\n{current_todo}{failure_section}\n\n"
         "Review the plan above. If executor notes or completed task results "
         "warrant a change, return the revised plan. Otherwise return the "
         "plan unchanged."
@@ -111,7 +140,7 @@ async def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], wor
 
     match task_spec.agent:
         case "browser":
-            browser = BrowserExecutor( workspace=workspace, model=MODEL, headless=True)
+            browser = BrowserExecutor( workspace=workspace, model=MODEL, headless=False, max_failures=8)
             browser_result = await browser.run(
                 query=task_spec.query,
                 expects=task_spec.expects,
@@ -182,26 +211,40 @@ async def main():
             # In a parallel version this is where you'd join on a running task.
             # No pending task can run — every remaining pending task is blocked
             # by a failed upstream. Mark them and exit.
-            
-            #raise RuntimeError("Nothing ready and nothing running")
+
+            failed_ids = {t.id for t in thisRun.plan.tasks if t.status == "failed"}
+            # Mark only tasks blocked by a failed ancestor; leave others for a replan pass.
+            progressed = False
             for t in thisRun.plan.tasks:
-                if t.status == "pending":
+                if t.status == "pending" and any(dep in failed_ids for dep in t.deps):
                     t.status = "failed"
-                    t.error = "upstream task failed"
+                    t.error = f"upstream task failed: {[d for d in t.deps if d in failed_ids]}"
+                    progressed = True
             write_todo_atomic(thisRun)
-            break
+            if not progressed:
+                break # genuinly nothing left to do.
+            continue
         
         for task in ready:
             task.status = "dispatched"
             dep_files = []
             for dep in task.deps:
-                dep_files.extend(dep.produced)
+                dep_files.extend(tasks_by_id[dep].produced)
 
-            result = await dispatch_executor_agent(task, dep_files, Path(workspace))
+            # Retry the dispatch on error. Each attempt is a fresh executor, so
+            # a wedged browser session or transient hang doesn't carry over.
+            result = None
+            for attempt in range(1, MAX_DISPATCH_ATTEMPTS + 1):
+                result = await dispatch_executor_agent(task, dep_files, Path(workspace))
+                if not result.error:
+                    break
+                print(f"[{task.id}] attempt {attempt}/{MAX_DISPATCH_ATTEMPTS} failed: {result.error}")
+                if attempt < MAX_DISPATCH_ATTEMPTS:
+                    await asyncio.sleep(2 * attempt)  # linear backoff: 2s, 4s
+
             if result.error:
                 task.status = "failed"
-                task.error = result.error
-                continue
+                task.error = f"after {MAX_DISPATCH_ATTEMPTS} attempts: {result.error}"
             else:
                 # files were written by the executor's write_file tool during
                 # its run; we only verify they exist and are non-empty.

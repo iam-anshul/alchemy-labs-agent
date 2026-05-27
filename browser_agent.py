@@ -50,12 +50,14 @@ class BrowserExecutor:
         max_steps: int = 30,
         headless: bool = True,
         use_cloud: bool = False,
+        max_failures: int = 8,
     ):
         self.workspace = workspace.resolve()
         self.model = model
         self.max_steps = max_steps
         self.headless = headless
         self.use_cloud = use_cloud
+        self.max_failures = max_failures
 
         # Mutable state captured by the submit tool
         self._submitted: ExecutorResult | None = None
@@ -73,6 +75,10 @@ class BrowserExecutor:
         browser = Browser(
             headless=self.headless,
             downloads_path=str(self.workspace / "outputs"),
+            cross_origin_iframes=False,   # maintainers' OWN docstring: avoids "hanging"
+            max_iframes=10,               # default 100
+            max_iframe_depth=3,           # default 5
+            paint_order_filtering=False,  # cuts serialization CPU cost
         )
 
         browser_llm = QwenChatOpenAI(
@@ -85,12 +91,17 @@ class BrowserExecutor:
             task=task_prompt,
             llm=browser_llm,
             tools=tools,
-            max_steps=self.max_steps,
             use_cloud=self.use_cloud,
+            browser=browser,
+            max_failures=self.max_failures
         )
 
+        history = None
         try:
-            await browser_agent.run()
+            # max_steps is a run() arg in browser-use, NOT a constructor arg.
+            # Passing it to Agent(...) is silently ignored and run() falls back
+            # to its default of 500. Pass it here so the cap is actually enforced.
+            history = await browser_agent.run(max_steps=self.max_steps)
         except Exception as e:
             return ExecutorResult(
                 produced=[],
@@ -101,12 +112,42 @@ class BrowserExecutor:
             await browser.kill()
 
         if self._submitted is None:
+            # The agent ended (called done, exhausted steps, or stopped) without
+            # calling our submit tool. Surface its OWN final result and errors so
+            # the planner can see WHY it failed and reroute on replan, instead of
+            # a generic "no submit" string.
             return ExecutorResult(
                 produced=[],
                 notes="",
-                error="Agent exhausted steps without calling submit",
+                error=self._failure_detail(history),
             )
         return self._submitted
+
+    @staticmethod
+    def _failure_detail(history) -> str:
+        """Build a planner-readable failure string from the browser-use run
+        history. The agent's final_result() holds its own account of what
+        happened (e.g. 'screener.in search unresponsive, no alternatives tried'),
+        which is exactly what the planner needs to make an informed rewrite."""
+        base = "Agent ended without calling submit."
+        if history is None:
+            return base
+        parts = [base]
+        try:
+            final = history.final_result()
+            if final:
+                parts.append(f"Final result: {final}")
+        except Exception:
+            pass
+        try:
+            errs = history.errors()
+            # errors() returns one entry per step, mostly None; keep the real ones.
+            real = [e for e in errs if e] if errs else []
+            if real:
+                parts.append(f"Step errors: {real[-3:]}")  # last few are most relevant
+        except Exception:
+            pass
+        return " ".join(parts)
 
     def _build_task_prompt(
         self,
@@ -130,9 +171,22 @@ INPUT FILES FROM UPSTREAM TASKS (read these as needed using read_file):
 {dep_section}
 
 WORKSPACE:
-All paths are relative to {self.workspace}.
+All paths are relative to your workspace root.
 Write your outputs under outputs/.
 Use the write_file tool to save findings — do NOT just return text in your final message.
+
+IF YOU ARE BLOCKED:
+Do NOT attempt to solve CAPTCHAs, "I'm not a robot" checks, or bot-detection
+challenges — you cannot solve them and trying wastes the entire run. Do not click
+CAPTCHA images or checkboxes. If a page blocks you with a CAPTCHA, consent wall,
+or login wall, leave it immediately and try a different source. Prefer primary
+and official sources (company investor-relations pages, regulatory filings,
+reputable data providers) over Google search, which frequently challenges
+automated browsers. If after one or two alternative sources you still cannot get
+the required data, stop and submit: write whatever partial findings you have to
+the expected output file, clearly marking what is missing and that you were
+blocked, and put the reason in your submit notes (e.g. "Google hit a reCAPTCHA;
+retrieved figures from screener.in instead" or "all sources blocked, no data").
 
 WHEN DONE:
 Call the submit tool with:

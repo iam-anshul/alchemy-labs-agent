@@ -35,7 +35,9 @@ def render_task(task: TaskSpec) -> str:
     deps_str = ", ".join(getattr(d, "id", d) for d in task.deps) if task.deps else "none"
     produced_str = format_list(task.produced)
     notes_str = task.notes.strip() or ""
-    error_line = f"- error: {task.error}\n" if task.status == "failed" and task.error else ""
+    # task.error is intentionally NOT rendered here. todo.md is user-facing;
+    # executor failure diagnostics go to the planner via an internal channel in
+    # planner() instead. The [!] checkbox still signals failure to the user.
 
     return (
         f"## {checkbox} {task.id} — {task.title}\n"
@@ -45,7 +47,6 @@ def render_task(task: TaskSpec) -> str:
         f"- expects: {indent_continuation(task.expects)}\n"
         f"- produced: {produced_str}\n"
         f"- notes: {notes_str}\n"
-        f"{error_line}"
     )
 
 
