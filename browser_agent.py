@@ -1,9 +1,15 @@
 from browser_use import Agent, Tools, Browser, ChatOpenAI
+from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
+from browser_use.llm.openai.serializer import OpenAIMessageSerializer
+from browser_use.llm.schema import SchemaOptimizer
+from browser_use.llm.views import ChatInvokeCompletion
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
+from typing import Any
+import json
 from pydantic import BaseModel
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIConnectionError, RateLimitError
 from orchestrator import OPENAI_BASE_URL, OPENAI_KEY
 
 
@@ -34,6 +40,156 @@ class QwenChatOpenAI(ChatOpenAI):
         return client
 
 
+@dataclass
+class QwenToolCallChatOpenAI(QwenChatOpenAI):
+    """OpenAI-compatible client that uses native tool calling for structured
+    output. Modeled directly after browser-use's own Groq client
+    (`llm/groq/chat.py::_invoke_with_tool_calling`), which routes Kimi and
+    similar tool-call-capable Groq-hosted models through one tool +
+    `tool_choice="required"`.
+
+    Why this exists: response_format=json_schema is a *hint* on most non-OpenAI
+    providers — they don't decode-enforce it, so weaker models produce
+    truncated or wrong-shape JSON. The `tools=` parameter is a separate,
+    older, more-widely-enforced protocol. On a model that actually supports
+    tool calling on this provider (Qwen-Plus, Qwen-Max, Qwen3 — NOT
+    qwen-vl-max, which silently ignores `tools=`), this gives
+    schema-validated structured output via the same channel real tool calls
+    use.
+
+    For output_format=None (unstructured nudges), defers to the parent.
+    """
+
+    async def ainvoke(self, messages, output_format=None, **kwargs):
+        if output_format is None:
+            return await super().ainvoke(messages, output_format=None, **kwargs)
+
+        openai_messages = OpenAIMessageSerializer.serialize_messages(messages)
+        schema = SchemaOptimizer.create_optimized_json_schema(
+            output_format,
+            remove_min_items=self.remove_min_items_from_schema,
+            remove_defaults=self.remove_defaults_from_schema,
+        )
+        tool = {
+            "type": "function",
+            "function": {
+                "name": output_format.__name__,
+                "description": f"Extract information in the format of {output_format.__name__}",
+                "parameters": schema,
+            },
+        }
+
+        # Mirror the parent's model_params build so we don't drop temperature/etc.
+        model_params: dict[str, Any] = {}
+        if self.temperature is not None:           model_params["temperature"] = self.temperature
+        if self.frequency_penalty is not None:     model_params["frequency_penalty"] = self.frequency_penalty
+        if self.max_completion_tokens is not None: model_params["max_completion_tokens"] = self.max_completion_tokens
+        if self.top_p is not None:                 model_params["top_p"] = self.top_p
+        if self.seed is not None:                  model_params["seed"] = self.seed
+        if self.service_tier is not None:          model_params["service_tier"] = self.service_tier
+
+        try:
+            response = await self.get_client().chat.completions.create(
+                model=self.model,
+                messages=openai_messages,
+                tools=[tool],
+                tool_choice="required",
+                **model_params,
+            )
+        except RateLimitError as e:
+            raise ModelRateLimitError(message=e.message, model=self.name) from e
+        except APIConnectionError as e:
+            raise ModelProviderError(message=str(e), model=self.name) from e
+
+        choice = response.choices[0] if response.choices else None
+        if choice is None:
+            raise ModelProviderError(message="Empty `choices`.", status_code=502, model=self.name)
+
+        # Prefer tool_calls; fall back to content (Groq's client does the same —
+        # some compat shims put the JSON in content even when tool_choice="required").
+        args_json: str | None = None
+        if choice.message.tool_calls:
+            args_json = choice.message.tool_calls[0].function.arguments
+        elif choice.message.content:
+            args_json = choice.message.content
+
+        if not args_json:
+            raise ModelProviderError(
+                message=f"Expected tool_call from {self.model}, got none.",
+                status_code=500, model=self.name,
+            )
+
+        # Qwen models emit list/dict fields as JSON-encoded strings sometimes —
+        # e.g. action='\n[{"done": ...}]\n' or plan_update='["a","b"]'. Decode
+        # those before Pydantic sees them; anything that won't parse is left
+        # for Pydantic to error on as usual.
+        parsed = self._unstringify_collections(json.loads(args_json), output_format)
+
+        # Qwen thinking-mode models sometimes dump <think>...</think> into the
+        # optional `thinking` field and never populate the required ones, so
+        # the tool call comes back with most of AgentOutput missing. Pad any
+        # missing required field with a type-appropriate default so the step
+        # validates and the loop survives the partial response; the agent will
+        # try again next turn, and existing loop detection / retry / replan
+        # layers handle persistent failure.
+        parsed = self._pad_missing_required(parsed, output_format)
+
+        return ChatInvokeCompletion(
+            completion=output_format.model_validate(parsed),
+            usage=self._get_usage(response),
+            stop_reason=choice.finish_reason,
+        )
+
+    @staticmethod
+    def _pad_missing_required(d: dict, output_format: type) -> dict:
+        """For each required property absent from `d`, inject a default
+        appropriate to its declared type: [] for arrays, {} for objects, ''
+        for everything else (covers string and string|null unions)."""
+        schema = output_format.model_json_schema()
+        required = schema.get("required", [])
+        props = schema.get("properties", {})
+        for k in required:
+            if k in d:
+                continue
+            fschema = props.get(k, {})
+            types = {fschema.get("type"), *(b.get("type") for b in fschema.get("anyOf", []))}
+            if "array" in types:
+                d[k] = []
+            elif "object" in types:
+                d[k] = {}
+            else:
+                d[k] = ""
+        return d
+
+    @staticmethod
+    def _unstringify_collections(d: dict, output_format: type) -> dict:
+        """For each property whose schema allows array/object:
+          - JSON-encoded string ('["a","b"]') → json.loads it
+          - empty string ('')                 → drop the key (let the field's
+                                                default — usually None — apply)
+        Other values are left alone; Pydantic surfaces its own error."""
+        props = output_format.model_json_schema().get("properties", {})
+        for k in list(d.keys()):
+            v = d[k]
+            if not isinstance(v, str):
+                continue
+            schema = props.get(k, {})
+            types = {schema.get("type"), *(b.get("type") for b in schema.get("anyOf", []))}
+            if "array" not in types and "object" not in types:
+                continue
+            vs = v.strip()
+            if not vs:
+                d.pop(k)
+                continue
+            if vs[0] not in ("[", "{"):
+                continue
+            try:
+                d[k] = json.loads(v)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return d
+
+
 class ExecutorResult(BaseModel):
     produced: list[str]  # relative paths to workspace
     notes: str
@@ -47,7 +203,7 @@ class BrowserExecutor:
         self,
         workspace: Path,
         model: str,
-        max_steps: int = 30,
+        max_steps: int = 50,
         headless: bool = True,
         use_cloud: bool = False,
         max_failures: int = 8,
@@ -81,7 +237,7 @@ class BrowserExecutor:
             paint_order_filtering=False,  # cuts serialization CPU cost
         )
 
-        browser_llm = QwenChatOpenAI(
+        browser_llm = QwenToolCallChatOpenAI(
             model=self.model,
             base_url=OPENAI_BASE_URL,
             api_key=OPENAI_KEY,

@@ -121,8 +121,15 @@ def officecli(ctx: RunContext[OfficeDeps], args: list[str]) -> str:
             "ERROR: officecli binary not found on PATH. "
             "Install from https://github.com/iOfficeAI/OfficeCLI"
         )
+    # Append --json by default so the agent sees structured output. Skip it for
+    # commands that print plain markdown/help text and silently ignore the
+    # following positional arg when --json is set (load_skill, help, ...).
+    plain_text_commands = {"load_skill", "help", "--help", "-h"}
+    cmd_args = list(args)
+    if not cmd_args or cmd_args[0] not in plain_text_commands:
+        cmd_args.append("--json")
     result = subprocess.run(
-        [_OFFICECLI_PATH, *args, "--json"],
+        [_OFFICECLI_PATH, *cmd_args],
         capture_output=True,
         cwd=ctx.deps.workspace,
     )

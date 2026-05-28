@@ -140,7 +140,7 @@ async def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], wor
 
     match task_spec.agent:
         case "browser":
-            browser = BrowserExecutor( workspace=workspace, model=MODEL, headless=False, max_failures=8)
+            browser = BrowserExecutor( workspace=workspace, model=MODEL, headless=True, max_failures=8)
             browser_result = await browser.run(
                 query=task_spec.query,
                 expects=task_spec.expects,

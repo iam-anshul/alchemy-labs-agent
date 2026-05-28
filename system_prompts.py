@@ -173,11 +173,29 @@ For ANY operation that creates or modifies a .docx, .xlsx, or .pptx file — cre
 
 ## How to work
 
-1. Read your inputs first using `read_file` on every dep input. Understand what data you actually have before designing the output.
-2. Plan your `officecli` calls. For a populated workbook or document, the right pattern is usually: `create` the file, then either `import` a CSV for tabular data or run a `batch` of `set` / `add` operations from a JSON spec. A loop of one-at-a-time `set` calls works but is slower; prefer `batch` or `import` for anything more than a handful of cells.
-3. If `officecli` truly cannot do something (rare — check the command list with `officecli --help` via `run_command` if unsure), and the operation is computational rather than structural, write a Python script with pandas/matplotlib to `outputs/_build_<task>.py`, run it with `run_command`, and have it output an intermediate CSV/JSON that you then load into the Office file with `officecli import`.
-4. Match the EXPECTED OUTPUT contract precisely — sheet names, column names, file paths.
-5. After writing each artifact, you may verify it with `officecli get` or `officecli query` to confirm the structure landed correctly. The `submit` tool will reject empty or missing files.
+1. **Load the right OfficeCLI skill FIRST — this is what makes outputs not look ugly.**
+   Before designing any non-trivial Office artifact, run `officecli load_skill <name>` (via the `officecli` tool with `args=['load_skill', '<name>']`). It prints a SKILL.md to stdout containing conventions, design rules, layout patterns, and color/typography choices the OfficeCLI maintainers wrote specifically for that artifact type. Read the output and follow it. The OfficeCLI maintainers state this directly in their top-level SKILL.md: *"Before doc work, check Specialized Skills. Fundraising decks, academic papers, financial models, dashboards, and Morph animations need their own skill loaded first — load_skill once, then proceed."*
+
+   Available skills (pick the most specific match):
+   - `pitch-deck` — polished business presentations (the right pick for ANY summary deck: financials, market analysis, project status, etc.).
+   - `morph-ppt` / `morph-ppt-3d` — decks with morph transitions or 3D effects.
+   - `pptx` — generic PowerPoint baseline (use only if no specialized PPT skill fits).
+   - `data-dashboard` — Excel KPI dashboards with formatted tables and conditional formatting.
+   - `financial-model` — Excel financial models (P&L, valuation, scenario analysis).
+   - `academic-paper` — Word formal docs with headings, citations, structured sections.
+   - `word` / `excel` — generic baselines for the format.
+
+   Skip this step only for one-shot tweaks (single cell edit, rename a heading). For any deliverable the user will look at — a presentation, a dashboard, a report — loading the right skill is the single biggest determinant of whether the output looks professional or amateurish.
+
+2. Read your dep inputs with `read_file`. Understand what data you actually have before designing.
+
+3. Plan your `officecli` calls following the skill's conventions. For populated tables, prefer `import` (CSV) or `batch` (JSON of `set`/`add` ops) over one-at-a-time `set` calls.
+
+4. If `officecli` truly cannot do something (rare — and the loaded skill usually shows you the right command), and it's computational (data analysis, chart-image generation), write a Python script via `write_file` + `run_command`, output an intermediate CSV/JSON, then load it back with `officecli import`.
+
+5. Match the EXPECTED OUTPUT contract precisely — sheet names, column names, file paths.
+
+6. After writing each artifact, verify with `officecli get`, `officecli query`, or `officecli view <file> stats|outline|issues`. The `submit` tool will reject empty or missing files.
 
 ## Finishing: the `submit` call
 
