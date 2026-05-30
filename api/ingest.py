@@ -130,3 +130,23 @@ def start_workers(n: int | None = None) -> None:
     for _ in range(count):
         _worker_tasks.append(asyncio.create_task(ingest_worker()))
     log.info("Started %d ingest worker(s)", count)
+
+
+async def shutdown_workers() -> None:
+    """Drain the queue, then cancel the worker tasks. Call from whichever
+    entrypoint started them (api/app.py lifespan, main.py finally block, etc.)
+    before that entrypoint exits — otherwise the worker tasks dangle and any
+    docs still in `queued` state never finish processing.
+
+    Order matters: join() first so already-queued items get processed; then
+    cancel() to break the workers out of their `await queue.get()` loop;
+    then gather() so the cancellations actually settle before we return."""
+    if not _worker_tasks:
+        return
+    log.info("Waiting for ingest queue to drain (%d pending)...", _ingest_queue.qsize())
+    await _ingest_queue.join()
+    for task in _worker_tasks:
+        task.cancel()
+    await asyncio.gather(*_worker_tasks, return_exceptions=True)
+    _worker_tasks.clear()
+    log.info("Ingest workers shut down")

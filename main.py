@@ -4,11 +4,13 @@ from orchestrator import plannerAgent
 from browser_agent import BrowserExecutor
 from office_agent import run_office_executor
 from doc_agent import run_doc_executor
+from api.ingest import start_workers, shutdown_workers
 from formats_pydantic import Run, PlanOutput, TaskSpec
 from render_todo import render_todo
 from time import time
 import random
 import asyncio
+import shutil
 
 from dotenv import load_dotenv
 import os
@@ -186,7 +188,25 @@ def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bo
 
 async def main():
     userGoal = input("What's your goal: ")
+    files_attached = input("Any files to attach? Give a path")
     workspace = make_workspace(f"{Path.cwd()}/workspace/{random.randint(0, 99)}{userGoal[:10]}")
+
+    if files_attached.strip():
+        path = Path(files_attached.strip())
+        if path.exists():
+            shutil.copy(path, workspace)
+            print("File found and attached to workspace")
+            userGoal += f"""
+
+The user provided these files; they have been copied into the workspace and
+are already present at the relative paths below — no upstream task needs to
+produce them. When designing tasks, reference these paths in the relevant
+task's `query` so the executor knows to read or ingest them.
+  - {path.name}
+"""
+        else:
+            raise FileNotFoundError(f"File {files_attached} does not exist")
+
 
     thisRun = Run(
             workspace=workspace,
@@ -197,87 +217,102 @@ async def main():
             started_at=time(),
             plan=None
         )
-    
-    thisRun.plan = await planner(thisRun)
 
-    # write todo
-    write_todo_atomic(thisRun)
+    # Start the doc-reasoner ingest workers BEFORE the planner runs. They drain
+    # the asyncio queue that ingest_local_file pushes onto, so PDFs uploaded
+    # via the doc agent's ingest_documents tool actually get parsed and indexed
+    # within this run instead of sitting at status='queued' forever (which is
+    # what happens when main.py runs without the FastAPI lifespan hook firing).
+    # shutdown_workers in finally drains any remaining ingests before exit so
+    # a doc the planner kicked off late still finishes before the process dies.
+    start_workers(n=2)
+    try:
+        thisRun.plan = await planner(thisRun)
 
-    while True:
-        if all(task.status == "completed" for task in thisRun.plan.tasks):
-            break
-            
-        ready = []    
-        tasks_by_id = {t.id: t for t in thisRun.plan.tasks}
+        # write todo
+        write_todo_atomic(thisRun)
 
-        for task in thisRun.plan.tasks:
-            if task.status == "pending":
-                if all(tasks_by_id[dep].status == "completed" for dep in task.deps):
-                    ready.append(task)
-        
-        if not ready:
-            # Either deadlocked or waiting on running tasks.
-            # In a parallel version this is where you'd join on a running task.
-            # No pending task can run — every remaining pending task is blocked
-            # by a failed upstream. Mark them and exit.
+        while True:
+            if all(task.status == "completed" for task in thisRun.plan.tasks):
+                break
 
-            failed_ids = {t.id for t in thisRun.plan.tasks if t.status == "failed"}
-            # Mark only tasks blocked by a failed ancestor; leave others for a replan pass.
-            progressed = False
-            for t in thisRun.plan.tasks:
-                if t.status == "pending" and any(dep in failed_ids for dep in t.deps):
-                    t.status = "failed"
-                    t.error = f"upstream task failed: {[d for d in t.deps if d in failed_ids]}"
-                    progressed = True
-            write_todo_atomic(thisRun)
-            if not progressed:
-                break # genuinly nothing left to do.
-            continue
-        
-        for task in ready:
-            task.status = "dispatched"
-            dep_files = []
-            for dep in task.deps:
-                dep_files.extend(tasks_by_id[dep].produced)
+            ready = []
+            tasks_by_id = {t.id: t for t in thisRun.plan.tasks}
 
-            # Retry the dispatch on error. Each attempt is a fresh executor, so
-            # a wedged browser session or transient hang doesn't carry over.
-            result = None
-            for attempt in range(1, MAX_DISPATCH_ATTEMPTS + 1):
-                result = await dispatch_executor_agent(task, dep_files, Path(workspace))
-                if not result.error:
-                    break
-                print(f"[{task.id}] attempt {attempt}/{MAX_DISPATCH_ATTEMPTS} failed: {result.error}")
-                if attempt < MAX_DISPATCH_ATTEMPTS:
-                    await asyncio.sleep(2 * attempt)  # linear backoff: 2s, 4s
+            for task in thisRun.plan.tasks:
+                if task.status == "pending":
+                    if all(tasks_by_id[dep].status == "completed" for dep in task.deps):
+                        ready.append(task)
 
-            if result.error:
-                task.status = "failed"
-                task.error = f"after {MAX_DISPATCH_ATTEMPTS} attempts: {result.error}"
-            else:
-                # files were written by the executor's write_file tool during
-                # its run; we only verify they exist and are non-empty.
-                ok, status = validate_files_exist(workspace, result.produced)
-                if not ok:
-                    raise RuntimeError(status)
-                task.status = "completed"
-                task.produced = result.produced
-                task.notes = result.notes
+            if not ready:
+                # Either deadlocked or waiting on running tasks.
+                # In a parallel version this is where you'd join on a running task.
+                # No pending task can run — every remaining pending task is blocked
+                # by a failed upstream. Mark them and exit.
 
-            # ask the planner whether the plan needs revision, but only while
-            # we still have replan budget
-            # persist *and* replan regardless of success/failure — a failure is
-            # exactly when the planner most needs to see the state and decide
-            # whether to revise.
-            if thisRun.replans_used < thisRun.replan_budget:
-                new_plan = await planner(thisRun)
-                if _plan_signature(new_plan) != _plan_signature(thisRun.plan):
-                    thisRun.plan = _merge_plan(thisRun.plan, new_plan)
-                    thisRun.replans_used += 1
+                failed_ids = {t.id for t in thisRun.plan.tasks if t.status == "failed"}
+                # Mark only tasks blocked by a failed ancestor; leave others for a replan pass.
+                progressed = False
+                for t in thisRun.plan.tasks:
+                    if t.status == "pending" and any(dep in failed_ids for dep in t.deps):
+                        t.status = "failed"
+                        t.error = f"upstream task failed: {[d for d in t.deps if d in failed_ids]}"
+                        progressed = True
+                write_todo_atomic(thisRun)
+                if not progressed:
+                    break # genuinly nothing left to do.
+                continue
 
-            # always rewrite todo.md so status, produced, and any replan land on disk
-            write_todo_atomic(thisRun)
-    
+            for task in ready:
+                task.status = "dispatched"
+                dep_files = []
+                for dep in task.deps:
+                    dep_files.extend(tasks_by_id[dep].produced)
+
+                # Retry the dispatch on error. Each attempt is a fresh executor, so
+                # a wedged browser session or transient hang doesn't carry over.
+                result = None
+                for attempt in range(1, MAX_DISPATCH_ATTEMPTS + 1):
+                    result = await dispatch_executor_agent(task, dep_files, Path(workspace))
+                    if not result.error:
+                        break
+                    print(f"[{task.id}] attempt {attempt}/{MAX_DISPATCH_ATTEMPTS} failed: {result.error}")
+                    if attempt < MAX_DISPATCH_ATTEMPTS:
+                        await asyncio.sleep(2 * attempt)  # linear backoff: 2s, 4s
+
+                if result.error:
+                    task.status = "failed"
+                    task.error = f"after {MAX_DISPATCH_ATTEMPTS} attempts: {result.error}"
+                else:
+                    # files were written by the executor's write_file tool during
+                    # its run; we only verify they exist and are non-empty.
+                    ok, status = validate_files_exist(workspace, result.produced)
+                    if not ok:
+                        raise RuntimeError(status)
+                    task.status = "completed"
+                    task.produced = result.produced
+                    task.notes = result.notes
+
+                # ask the planner whether the plan needs revision, but only while
+                # we still have replan budget
+                # persist *and* replan regardless of success/failure — a failure is
+                # exactly when the planner most needs to see the state and decide
+                # whether to revise.
+                if thisRun.replans_used < thisRun.replan_budget:
+                    new_plan = await planner(thisRun)
+                    if _plan_signature(new_plan) != _plan_signature(thisRun.plan):
+                        thisRun.plan = _merge_plan(thisRun.plan, new_plan)
+                        thisRun.replans_used += 1
+
+                # always rewrite todo.md so status, produced, and any replan land on disk
+                write_todo_atomic(thisRun)
+    finally:
+        # Drain any ingest queued during the run (a doc agent may have kicked
+        # off a slow LlamaParse + tree build right before submit) and cancel
+        # the workers so the process exits cleanly. Errors here are swallowed
+        # by shutdown_workers via gather(return_exceptions=True).
+        await shutdown_workers()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
