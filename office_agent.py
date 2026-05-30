@@ -24,6 +24,7 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL")
 
 
+#Note: this exact same dataclass is in use with doc agent as well. In a larger project we would want to deduplicate this, but for the sake of keeping each agent self-contained I'm leaving it as-is in both places.
 @dataclass
 class OfficeDeps:
     """Per-run state passed into the office agent via RunContext.
@@ -48,7 +49,7 @@ theOfficeAgent = Agent[OfficeDeps, str](
     model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
 )
 
-
+#Note: this exact same funtion is in use with doc agent as well. In a larger project we would want to deduplicate this, but for the sake of keeping each agent self-contained I'm leaving it as-is in both places.
 def _resolve_inside(workspace: Path, path: str) -> Path | str:
     """Resolve `path` against workspace and reject anything outside it.
     Returns the absolute Path on success, or a user-facing ERROR string

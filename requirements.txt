@@ -1,4 +1,29 @@
-pydantic-ai
-pydantic
+# AI / LLM
+pydantic-ai[openai]==1.101.0
+openai==2.38.0
+
+# Data validation & config
+pydantic==2.13.4
+pydantic-settings==2.14.1
+python-dotenv==1.2.2
+
+# Database (SQLite for local dev; psycopg for Postgres later)
+SQLAlchemy==2.0.49
+alembic==1.18.4
+psycopg[binary]==3.3.4
+
+# Document parsing
+llama-cloud-services>=0.6.94
+openpyxl>=3.1.5
+
+# Tabular reasoning
+pandas>=2.2.3
+
+# HTTP API
+fastapi>=0.118.0
+uvicorn[standard]>=0.34.0
+sse-starlette>=2.1.0
+python-multipart>=0.0.20
+
 browser-use
 playwright

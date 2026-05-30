@@ -1,8 +1,9 @@
 import os
 from pathlib import Path
 from orchestrator import plannerAgent
-from browser_agent import BrowserExecutor, ExecutorResult
+from browser_agent import BrowserExecutor
 from office_agent import run_office_executor
+from doc_agent import run_doc_executor
 from formats_pydantic import Run, PlanOutput, TaskSpec
 from render_todo import render_todo
 from time import time
@@ -156,7 +157,15 @@ async def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], wor
                 )
             return office_result
         case "document_answering":
-            ...
+            doc_result = await run_doc_executor(
+                workspace=workspace,
+                workspace_id="ws_default", # for now, doc agent needs a workspace_id to find the right vector index; we only have one workspace so we can hardcode it here. In a multi-workspace future, the planner would need to specify which workspace an executor should use, and that would get plumbed through here.
+                user_id="user_dev", # for now, doc agent needs a user_id to find the right vector index; we only have one user so we can hardcode it here. In a multi-user future, the planner would need to specify which user an executor should use, and that would get plumbed through here.
+                query=task_spec.query,
+                expects=task_spec.expects,
+                dep_files=dep_files
+            )
+            return doc_result
 
 def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bool, str]:
     """Verify each produced path exists under the workspace and is non-empty.
