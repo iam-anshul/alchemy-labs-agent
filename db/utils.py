@@ -10,7 +10,16 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from db.models import Doc, ExtractedTable, Node, Page, Query, Report
+from db.models import (
+    Doc,
+    ExtractedTable,
+    Node,
+    Page,
+    Query,
+    Report,
+    Workspace,
+    WorkspaceRun,
+)
 
 
 # ── Docs ──────────────────────────────────────────────────────────────────
@@ -156,3 +165,89 @@ def update_report(db: Session, report_id: str, **fields: Any) -> Report | None:
     db.commit()
     db.refresh(report)
     return report
+
+
+# ── Workspaces ────────────────────────────────────────────────────────────
+
+def create_workspace(db: Session, **fields: Any) -> Workspace:
+    """Insert a new workspace row and return it. Caller supplies workspace_id
+    (since it's user-chosen) and user_id."""
+    ws = Workspace(**fields)
+    db.add(ws)
+    db.commit()
+    db.refresh(ws)
+    return ws
+
+
+def get_workspace(db: Session, workspace_id: str) -> Workspace | None:
+    return db.get(Workspace, workspace_id)
+
+
+def list_workspaces(db: Session, user_id: str) -> list[Workspace]:
+    """Return all workspaces owned by a user, newest first."""
+    return list(db.scalars(
+        select(Workspace)
+        .where(Workspace.user_id == user_id)
+        .order_by(desc(Workspace.created_at))
+    ))
+
+
+def get_or_create_workspace(
+    db: Session, workspace_id: str, user_id: str, title: str | None = None
+) -> Workspace:
+    """Idempotent lookup-or-insert. Returns the existing workspace if one with
+    this id exists; otherwise creates and returns a new one. Used by main.py's
+    interactive entrypoint so a user can either resume a chat or start one with
+    a single prompt."""
+    existing = db.get(Workspace, workspace_id)
+    if existing is not None:
+        return existing
+    return create_workspace(db, workspace_id=workspace_id, user_id=user_id, title=title)
+
+
+# ── Workspace runs (planner chat history) ─────────────────────────────────
+
+def create_workspace_run(db: Session, **fields: Any) -> WorkspaceRun:
+    """Insert a workspace run row at run-start (typically status='running').
+    The caller fills in todo_md and flips status to 'completed' or 'failed'
+    later via update_workspace_run."""
+    run = WorkspaceRun(**fields)
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def get_workspace_run(db: Session, run_id: str) -> WorkspaceRun | None:
+    return db.get(WorkspaceRun, run_id)
+
+
+def update_workspace_run(
+    db: Session, run_id: str, **fields: Any
+) -> WorkspaceRun | None:
+    """Update mutable fields on a run (typically todo_md + status at end of
+    run). Returns None if the row doesn't exist."""
+    run = db.get(WorkspaceRun, run_id)
+    if run is None:
+        return None
+    for key, value in fields.items():
+        setattr(run, key, value)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def list_recent_runs(
+    db: Session, workspace_id: str, limit: int = 5
+) -> list[WorkspaceRun]:
+    """Return the most recent runs in a workspace, in CHRONOLOGICAL order
+    (oldest first). The reverse-on-DESC trick gives us the newest N runs
+    cheaply while still presenting them to the planner as a coherent
+    conversation timeline."""
+    rows = list(db.scalars(
+        select(WorkspaceRun)
+        .where(WorkspaceRun.workspace_id == workspace_id)
+        .order_by(desc(WorkspaceRun.created_at))
+        .limit(limit)
+    ))
+    return list(reversed(rows))

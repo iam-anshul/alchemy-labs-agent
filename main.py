@@ -1,14 +1,17 @@
 import os
+import uuid
 from pathlib import Path
 from orchestrator import plannerAgent
 from browser_agent import BrowserExecutor
 from office_agent import run_office_executor
 from doc_agent import run_doc_executor
 from api.ingest import start_workers, shutdown_workers
+from db import SessionLocal
+from db import utils as db_utils
 from formats_pydantic import Run, PlanOutput, TaskSpec
 from render_todo import render_todo
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart, TextPart
 from time import time
-import random
 import asyncio
 import shutil
 
@@ -68,11 +71,6 @@ def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
     produced over from the old plan for any task id that survives.
     """
     old_by_id = {t.id: t for t in old.tasks}
-    # for t in new.tasks:
-    #     if t.id in old_by_id:
-    #         t.status = old_by_id[t.id].status
-    #         t.produced = old_by_id[t.id].produced
-    # return new
 
     for t in new.tasks:
         if t.id in old_by_id:
@@ -98,17 +96,60 @@ def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
                 t.notes = old_t.notes
     return new
     
+def _build_message_history_from_prior_runs(workspace_id: str, current_run_id: str | None) -> list[ModelMessage]:
+    """Reconstruct a synthetic conversation history from this workspace's prior
+    runs so the planner can see what was tried before (Option B per the design
+    discussion). For each prior run we emit a ModelRequest(user_goal) + a
+    ModelResponse(todo_md) pair — pydantic-ai treats this as a real multi-turn
+    conversation when passed via the `message_history` parameter.
+
+    Why prior runs instead of just the current one's state: this is the
+    "learn from prior conversation turns" feature. Within a single run, replan
+    calls deliberately skip this — they should only reason about the in-flight
+    todo.md, not get distracted by past conversation.
+
+    The current in-flight run is excluded by run_id even if its row was
+    created at run-start (status='running' with empty todo_md); otherwise the
+    planner would see itself in its own history."""
+    with SessionLocal() as db:
+        runs = db_utils.list_recent_runs(db, workspace_id=workspace_id, limit=5)
+    messages: list[ModelMessage] = []
+    for r in runs:
+        if current_run_id is not None and r.run_id == current_run_id:
+            continue
+        if not r.todo_md:
+            # Skip runs that never completed enough to render a todo.md —
+            # they'd be noise without signal.
+            continue
+        messages.append(ModelRequest(parts=[UserPromptPart(content=r.user_goal)]))
+        messages.append(ModelResponse(parts=[TextPart(content=r.todo_md)]))
+    return messages
+
+
 async def planner(run: Run) -> PlanOutput:
     """Run the planner LLM.
 
-    Initial call (no plan on the run yet): generate the plan from the
-    user's goal alone.
-    Subsequent calls: render the current todo.md and pass it to the agent
-    so it can review executor results and either return the plan unchanged
-    or a revised version.
+    Initial call (no plan on the run yet): generate the plan from the user's
+    goal alone. If this run is part of a persistent workspace, prior runs'
+    todo.mds are reconstructed as message_history so the planner sees the
+    conversation timeline.
+
+    Subsequent calls (replan): render the current todo.md and pass it to the
+    agent so it can review executor results and either return the plan
+    unchanged or a revised version. NO history injection — replans are
+    scoped to the in-flight run only, per design.
     """
     if not run.plan:
-        planner_run = await plannerAgent.run(user_prompt=run.goal)
+        message_history: list[ModelMessage] = []
+        if run.workspace_id:
+            message_history = _build_message_history_from_prior_runs(
+                workspace_id=run.workspace_id,
+                current_run_id=run.run_id,
+            )
+        planner_run = await plannerAgent.run(
+            user_prompt=run.goal,
+            message_history=message_history or None,
+        )
         return planner_run.output
 
     current_todo = render_todo(run)
@@ -139,7 +180,13 @@ async def planner(run: Run) -> PlanOutput:
     planner_run = await plannerAgent.run(user_prompt=replan_prompt)
     return planner_run.output
     
-async def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], workspace: Path) -> str:
+async def dispatch_executor_agent(
+    task_spec: TaskSpec,
+    dep_files: list[str],
+    workspace: Path,
+    workspace_id: str,
+    user_id: str,
+) -> str:
 
     match task_spec.agent:
         case "browser":
@@ -159,10 +206,14 @@ async def dispatch_executor_agent(task_spec: TaskSpec, dep_files: list[str], wor
                 )
             return office_result
         case "document_answering":
+            # Chat workspace_id IS the doc-reasoner workspace_id. This is the
+            # alignment that makes "documents ingested in this chat persist
+            # across runs in this chat" work for free — no separate scope to
+            # juggle, no hardcoded 'ws_default' anymore.
             doc_result = await run_doc_executor(
                 workspace=workspace,
-                workspace_id="ws_default", # for now, doc agent needs a workspace_id to find the right vector index; we only have one workspace so we can hardcode it here. In a multi-workspace future, the planner would need to specify which workspace an executor should use, and that would get plumbed through here.
-                user_id="user_dev", # for now, doc agent needs a user_id to find the right vector index; we only have one user so we can hardcode it here. In a multi-user future, the planner would need to specify which user an executor should use, and that would get plumbed through here.
+                workspace_id=workspace_id,
+                user_id=user_id,
                 query=task_spec.query,
                 expects=task_spec.expects,
                 dep_files=dep_files
@@ -187,9 +238,45 @@ def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bo
     return True, "All produced files exist and are non-empty"
 
 async def main():
+    # Chat identity comes first. Each workspace_id is one persistent chat;
+    # a fresh name creates the chat, an existing one resumes it. The user_id
+    # is hardcoded for the dev CLI — when this gets a FastAPI front-end the
+    # request-auth layer will provide it.
+    USER_ID = "user_dev"
+    workspace_id_input = input("Workspace id (chat name; blank for a fresh one): ").strip()
+    if not workspace_id_input:
+        workspace_id_input = f"chat_{uuid.uuid4().hex[:8]}"
+        print(f"Starting new chat: {workspace_id_input}")
+
     userGoal = input("What's your goal: ")
-    files_attached = input("Any files to attach? Give a path")
-    workspace = make_workspace(f"{Path.cwd()}/workspace/{random.randint(0, 99)}{userGoal[:10]}")
+    files_attached = input("Any files to attach? Give a path: ")
+
+    # Persistent state: ensure the workspace exists in the DB, allocate a run_id
+    # for this turn. We create the workspace_runs row BEFORE the planner fires
+    # so the row exists for observability even if the run crashes mid-flight
+    # (status stays 'running' and we can tell what happened). Status flips to
+    # 'completed' / 'failed' in the finally block at the end of this function.
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    with SessionLocal() as db:
+        db_utils.get_or_create_workspace(
+            db,
+            workspace_id=workspace_id_input,
+            user_id=USER_ID,
+            title=userGoal[:80],  # first goal becomes the chat label
+        )
+        db_utils.create_workspace_run(
+            db,
+            run_id=run_id,
+            workspace_id=workspace_id_input,
+            user_goal=userGoal,
+            status="running",
+        )
+
+    # Per-run filesystem subdir under the chat's workspace folder. Sub-agents'
+    # _resolve_inside guard keeps them confined to THIS subdir, so cross-run
+    # contamination is impossible — but the DB layer captures the chat identity
+    # so the planner still sees prior runs via message_history.
+    workspace = make_workspace(f"{Path.cwd()}/workspace/{workspace_id_input}/{run_id}")
 
     if files_attached.strip():
         path = Path(files_attached.strip())
@@ -215,7 +302,9 @@ task's `query` so the executor knows to read or ingest them.
             user_query=userGoal,
             timestamp=time(),
             started_at=time(),
-            plan=None
+            plan=None,
+            workspace_id=workspace_id_input,
+            run_id=run_id,
         )
 
     # Start the doc-reasoner ingest workers BEFORE the planner runs. They drain
@@ -273,7 +362,13 @@ task's `query` so the executor knows to read or ingest them.
                 # a wedged browser session or transient hang doesn't carry over.
                 result = None
                 for attempt in range(1, MAX_DISPATCH_ATTEMPTS + 1):
-                    result = await dispatch_executor_agent(task, dep_files, Path(workspace))
+                    result = await dispatch_executor_agent(
+                        task,
+                        dep_files,
+                        Path(workspace),
+                        workspace_id=workspace_id_input,
+                        user_id=USER_ID,
+                    )
                     if not result.error:
                         break
                     print(f"[{task.id}] attempt {attempt}/{MAX_DISPATCH_ATTEMPTS} failed: {result.error}")
@@ -307,6 +402,30 @@ task's `query` so the executor knows to read or ingest them.
                 # always rewrite todo.md so status, produced, and any replan land on disk
                 write_todo_atomic(thisRun)
     finally:
+        # Persist final state to workspace_runs so this turn becomes part of
+        # the chat's history for the next run's planner. todo_md gets the
+        # rendered final state; status reflects what happened. We compute
+        # status from the plan's tasks: any failed task → 'failed' overall,
+        # otherwise 'completed'. If the plan never got built (planner crashed
+        # on the initial call) we mark 'failed' with no todo_md.
+        final_status = "failed"
+        final_todo: str | None = None
+        if thisRun.plan is not None:
+            final_todo = render_todo(thisRun)
+            if any(t.status == "failed" for t in thisRun.plan.tasks):
+                final_status = "failed"
+            elif all(t.status == "completed" for t in thisRun.plan.tasks):
+                final_status = "completed"
+            else:
+                # Mid-flight interruption — leave as 'failed' so future planner
+                # runs see a clear signal that the previous turn didn't finish
+                # what it set out to do.
+                final_status = "failed"
+        with SessionLocal() as db:
+            db_utils.update_workspace_run(
+                db, run_id=run_id, todo_md=final_todo, status=final_status
+            )
+
         # Drain any ingest queued during the run (a doc agent may have kicked
         # off a slow LlamaParse + tree build right before submit) and cancel
         # the workers so the process exits cleanly. Errors here are swallowed

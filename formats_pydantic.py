@@ -26,10 +26,15 @@ class PlanOutput(BaseModel):
 class Run(BaseModel):
     user_query: str        # the raw user input that kicked off the run
     goal: str              # the distilled intent the planner reasons about
-    workspace: str
+    workspace: str         # filesystem path for this run's outputs (per-run subdir)
     started_at: datetime
     replans_used: int = 0
     replan_budget: int = 3  # max number of times the planner may revise the plan
     plan: PlanOutput | None = None
+    # Persistent identity for chat-style state. workspace_id groups multiple
+    # runs into one conversation; run_id identifies this single turn. Both
+    # optional so non-chat callers (older tests, ad-hoc scripts) still work.
+    workspace_id: str | None = None
+    run_id: str | None = None
 
 

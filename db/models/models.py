@@ -4,6 +4,7 @@ from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, LargeB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+import uuid
 
 
 class Doc(Base):
@@ -111,6 +112,41 @@ class Query(Base):
     answer: Mapped[str | None] = mapped_column(Text)
     citations_json: Mapped[dict | list | None] = mapped_column(JSON)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (Index("idx_workspaces_user_created", "user_id", "created_at"),)
+
+    workspace_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class WorkspaceRun(Base):
+    __tablename__ = "workspace_runs"
+    __table_args__ = (
+        Index("idx_workspace_runs_ws_created", "workspace_id", "created_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # user_goal is the raw user message that kicked off this run. Kept
+    # separate from todo_md so message-history reconstruction can use it as
+    # the synthetic ModelRequest content.
+    user_goal: Mapped[str] = mapped_column(Text, nullable=False)
+    todo_md: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, nullable=False, server_default="running")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
