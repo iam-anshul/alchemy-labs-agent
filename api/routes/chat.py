@@ -4,19 +4,23 @@ from pathlib import Path
 from orchestrator import plannerAgent
 from browser_agent import BrowserExecutor
 from office_agent import run_office_executor
-from doc_agent import run_doc_executor
 from api.ingest import start_workers, shutdown_workers
 from db import SessionLocal
 from db import utils as db_utils
-from formats_pydantic import Run, PlanOutput, TaskSpec
+from formats_pydantic import QueryRun, PlanOutput, TaskSpec
 from render_todo import render_todo
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart, TextPart
 from time import time
 import asyncio
 import shutil
+from uuid import uuid4, UUID
 
 from report import draft_report
 from agent import answer_query
+
+from fastapi import Depends, APIRouter, HTTPException
+from supertokens_python.recipe.session.framework.fastapi import verify_session
+from supertokens_python.recipe.session import SessionContainer
 
 from dotenv import load_dotenv
 import os
@@ -25,6 +29,8 @@ load_dotenv()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL")
+
+chat_router = APIRouter()
 
 # How many times to dispatch a task before marking it failed. Each attempt
 # builds a fresh executor (and, for browser tasks, a fresh browser), so a retry
@@ -118,18 +124,18 @@ def _build_message_history_from_prior_runs(workspace_id: str, current_run_id: st
         runs = db_utils.list_recent_runs(db, workspace_id=workspace_id, limit=5)
     messages: list[ModelMessage] = []
     for r in runs:
-        if current_run_id is not None and r.run_id == current_run_id:
+        if current_run_id is not None and r.query_id == current_run_id:
             continue
         if not r.todo_md:
             # Skip runs that never completed enough to render a todo.md —
             # they'd be noise without signal.
             continue
-        messages.append(ModelRequest(parts=[UserPromptPart(content=r.user_goal)]))
+        messages.append(ModelRequest(parts=[UserPromptPart(content=r.user_query)]))
         messages.append(ModelResponse(parts=[TextPart(content=r.todo_md)]))
     return messages
 
 
-async def planner(run: Run) -> PlanOutput:
+async def planner(run: QueryRun) -> PlanOutput:
     """Run the planner LLM.
 
     Initial call (no plan on the run yet): generate the plan from the user's
@@ -144,10 +150,10 @@ async def planner(run: Run) -> PlanOutput:
     """
     if not run.plan:
         message_history: list[ModelMessage] = []
-        if run.workspace_id:
+        if run.query_counter > 1:
             message_history = _build_message_history_from_prior_runs(
                 workspace_id=run.workspace_id,
-                current_run_id=run.run_id,
+                current_run_id=run.query_id,
             )
         planner_run = await plannerAgent.run(
             user_prompt=run.goal,
@@ -188,7 +194,7 @@ async def dispatch_executor_agent(
     dep_files: list[str],
     workspace: Path,
     workspace_id: str,
-    user_id: str,
+    user_id: UUID,
 ) -> str:
 
     match task_spec.agent:
@@ -210,7 +216,14 @@ async def dispatch_executor_agent(
             return office_result
         case "document_answering":
             if task_spec.doc_answering_mode == "ASK":
-                answer_query()
+                # doc id filter for filename to be shown in planner
+                answer_query(
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    query=task_spec.query,
+                    doc_id=...,
+                    
+                )
             elif task_spec.doc_answering_mode == "REPORT":
                 draft_report()
 
@@ -231,74 +244,93 @@ def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bo
             return False, f"File {rel_path!r} exists but is empty: {full_path}"
     return True, "All produced files exist and are non-empty"
 
-async def main():
-    # Chat identity comes first. Each workspace_id is one persistent chat;
-    # a fresh name creates the chat, an existing one resumes it. The user_id
-    # is hardcoded for the dev CLI — when this gets a FastAPI front-end the
-    # request-auth layer will provide it.
-    USER_ID = "user_dev"
-    workspace_id_input = input("Workspace id (chat name; blank for a fresh one): ").strip()
-    if not workspace_id_input:
-        workspace_id_input = f"chat_{uuid.uuid4().hex[:8]}"
-        print(f"Starting new chat: {workspace_id_input}")
+#---------------------------------I am below a function---------------------------------
 
-    userGoal = input("What's your goal: ")
-    files_attached = input("Any files to attach? Give a path: ")
-
-    # Persistent state: ensure the workspace exists in the DB, allocate a run_id
-    # for this turn. We create the workspace_runs row BEFORE the planner fires
-    # so the row exists for observability even if the run crashes mid-flight
-    # (status stays 'running' and we can tell what happened). Status flips to
-    # 'completed' / 'failed' in the finally block at the end of this function.
-    run_id = f"run_{uuid.uuid4().hex[:12]}"
+@chat_router.post("/create_workspace")
+async def register__workspace(workspace_name: str, session: SessionContainer = Depends(verify_session())) -> str:
     with SessionLocal() as db:
-        db_utils.get_or_create_workspace(
+        db_utils.create_workspace(
             db,
-            workspace_id=workspace_id_input,
-            user_id=USER_ID,
-            title=userGoal[:80],  # first goal becomes the chat label
+            workspace_id=workspace_name,
+            user_id=session.get_user_id()
         )
-        db_utils.create_workspace_run(
-            db,
-            run_id=run_id,
-            workspace_id=workspace_id_input,
-            user_goal=userGoal,
-            status="running",
+    make_workspace(f"{Path.cwd()}/file_system_root/{workspace_name}")
+    return workspace_name
+
+@chat_router.delete("/delete_workspace")
+async def delete_workspace(
+    workspace_name: str, session: SessionContainer = Depends(verify_session())
+) -> str:
+    """Delete a workspace and everything scoped to it — its QueryRuns and other
+    workspace-scoped rows in the DB, plus its directory tree on disk.
+
+    DB first, filesystem best-effort: the DB delete is the source of truth and
+    commits in one transaction. If the rmtree afterwards fails (e.g. a
+    permission error), it's logged and the request still succeeds — a leftover
+    directory with no DB rows pointing at it is harmless.
+    """
+    user_id = session.get_user_id()
+    with SessionLocal() as db:
+        deleted = db_utils.delete_workspace(
+            db, workspace_id=workspace_name, user_id=user_id
         )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Workspace not found")
 
-    # Per-run filesystem subdir under the chat's workspace folder. Sub-agents'
-    # _resolve_inside guard keeps them confined to THIS subdir, so cross-run
-    # contamination is impossible — but the DB layer captures the chat identity
-    # so the planner still sees prior runs via message_history.
-    workspace = make_workspace(f"{Path.cwd()}/workspace/{workspace_id_input}/{run_id}")
+    # Best-effort filesystem cleanup. ignore_errors swallows a missing dir (the
+    # workspace may have had no runs yet) and partial-permission failures; the
+    # DB is already authoritative at this point.
+    workspace_path = Path(f"{Path.cwd()}/file_system_root/{workspace_name}")
+    shutil.rmtree(workspace_path, ignore_errors=True)
 
-    if files_attached.strip():
-        path = Path(files_attached.strip())
-        if path.exists():
-            shutil.copy(path, workspace)
-            print("File found and attached to workspace")
-            userGoal += f"""
+    return workspace_name
 
-The user provided these files; they have been copied into the workspace and
-are already present at the relative paths below — no upstream task needs to
-produce them. When designing tasks, reference these paths in the relevant
-task's `query` so the executor knows to read or ingest them.
-  - {path.name}
-"""
-        else:
-            raise FileNotFoundError(f"File {files_attached} does not exist")
+@chat_router.post("/run", response_model=PlanOutput)
+async def create_chat(
+    workspace_name: str, # workspace name will be the workspace_id in db
+    query: str,
+    session: SessionContainer = Depends(verify_session())
+):
+    # whenever an agent creates a file we need to show that in events
+    # make apis for file content render to the ui
+    user_id = session.get_user_id()
+    # generate query id
+    query_id = uuid4()
 
+    #Check if the workspace exists or not, check in local filesystem and in the database as well.
 
-    thisRun = Run(
-            workspace=workspace,
-            replans_used=0,
-            goal=userGoal,
-            user_query=userGoal,
-            timestamp=time(),
+    #checking in local filesystem for the workspace
+
+    absolute_workspace_path = f"{Path.cwd()}/file_system_root/{workspace_name}"
+    workspace_path = Path(f"{Path.cwd()}/file_system_root/{workspace_name}")
+
+    if not workspace_path.exists():
+        # check in the database if the workspace exists
+        with SessionLocal() as db:
+            if db_utils.does_workspace_exist(db, workspace_id=workspace_name, user_id=user_id):
+                # make workspace directory in local filesystem
+                make_workspace(absolute_workspace_path)
+            else:
+                raise HTTPException(status_code=404, detail="Workspace not found")
+            
+    with SessionLocal() as db:
+        # also fetch the query counter
+        query_counter = db_utils.get_highest_query_counter(db, workspace_id=workspace_name, user_id=user_id)
+        if query_counter is None:
+            query_counter = 1
+
+    thisRun = QueryRun(
+            user_query=query,
+            goal=query, # setting goal as user query for now,later in the flow we will set it to goal field from the planner output
+            workspace=absolute_workspace_path, # Let's re-initiaze this appending sub dir path after the first planner run
             started_at=time(),
+            replans_used=0,
             plan=None,
-            workspace_id=workspace_id_input,
-            run_id=run_id,
+            workspace_id=workspace_name,
+            query_id=query_id,
+            user_id=user_id,
+            status="running",
+            query_counter=query_counter
         )
 
     # Start the doc-reasoner ingest workers BEFORE the planner runs. They drain
@@ -312,9 +344,20 @@ task's `query` so the executor knows to read or ingest them.
     try:
         thisRun.plan = await planner(thisRun)
 
+        # Per-run filesystem subdir under the chat's workspace folder. Sub-agents'
+        # _resolve_inside guard keeps them confined to THIS subdir, so cross-run
+        # contamination is impossible — but the DB layer captures the chat identity
+        # so the planner still sees prior runs via message_history.
+        # Naming works like this------>
+        # 1. we need to create this worksapce subdir after the first planner run, reason being we can use goal field of todo.md from planner as its name.
+        # 2. we need to have a query counter maintainer in db, all the names of the chat run will be prefixed with this counter value, so the naming scheme will look something like this: f"{query_counter}_{plan.goal}""
+        workspace_sub_dir = f"{thisRun.query_counter}_{str(thisRun.query_id)}" # define query counter in db
+        absolute_workspace_path_with_subdir = f"{absolute_workspace_path}/{workspace_sub_dir}"
+        thisRun.workspace = absolute_workspace_path_with_subdir
+        make_workspace(Path(absolute_workspace_path_with_subdir))
         # write todo
         write_todo_atomic(thisRun)
-
+        # let's fore the tasks ony by one and not concurrently.
         while True:
             if all(task.status == "completed" for task in thisRun.plan.tasks):
                 break
@@ -359,9 +402,9 @@ task's `query` so the executor knows to read or ingest them.
                     result = await dispatch_executor_agent(
                         task,
                         dep_files,
-                        Path(workspace),
-                        workspace_id=workspace_id_input,
-                        user_id=USER_ID,
+                        Path(absolute_workspace_path_with_subdir),
+                        workspace_id=workspace_name,
+                        user_id=user_id,
                     )
                     if not result.error:
                         break
@@ -375,9 +418,9 @@ task's `query` so the executor knows to read or ingest them.
                 else:
                     # files were written by the executor's write_file tool during
                     # its run; we only verify they exist and are non-empty.
-                    ok, status = validate_files_exist(workspace, result.produced)
+                    ok, status = validate_files_exist(absolute_workspace_path_with_subdir, result.produced)
                     if not ok:
-                        raise RuntimeError(status)
+                        raise HTTPException(status_code=500, detail=f"file validation for 'produced' of the task failed with status: {status}")
                     task.status = "completed"
                     task.produced = result.produced
                     task.notes = result.notes
@@ -396,6 +439,10 @@ task's `query` so the executor knows to read or ingest them.
                 # always rewrite todo.md so status, produced, and any replan land on disk
                 write_todo_atomic(thisRun)
     finally:
+
+        # Increment query_counter by 1
+        thisRun.query_counter +=1
+
         # Persist final state to workspace_runs so this turn becomes part of
         # the chat's history for the next run's planner. todo_md gets the
         # rendered final state; status reflects what happened. We compute
@@ -416,9 +463,9 @@ task's `query` so the executor knows to read or ingest them.
                 # what it set out to do.
                 final_status = "failed"
         with SessionLocal() as db:
-            db_utils.update_workspace_run(
-                db, run_id=run_id, todo_md=final_todo, status=final_status
-            )
+            e = db_utils.register_query_run(db, run=thisRun, final_todo=final_todo)
+            if e is not None:
+                raise HTTPException(status_code=500, detail=f"Could not write query run to the database error: {e}")
 
         # Drain any ingest queued during the run (a doc agent may have kicked
         # off a slow LlamaParse + tree build right before submit) and cancel
@@ -426,6 +473,11 @@ task's `query` so the executor knows to read or ingest them.
         # by shutdown_workers via gather(return_exceptions=True).
         await shutdown_workers()
 
+    # Return the final plan as the response_model=PlanOutput body. Placed
+    # OUTSIDE the finally so it never masks an in-flight exception. If the
+    # planner crashed before building a plan, thisRun.plan is None — surface
+    # that as a 500 rather than letting FastAPI fail response validation on None.
+    if thisRun.plan is None:
+        raise HTTPException(status_code=500, detail="Planner failed to produce a plan")
+    return thisRun.plan
 
-if __name__ == "__main__":
-    asyncio.run(main())

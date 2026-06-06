@@ -101,7 +101,6 @@ _da_logger.setLevel(logging.INFO)
 _da_logger.propagate = False
 _attach_handler(_da_logger, logging.INFO)
 
-
 def _surface_errors(fn):
     """Wrap a tool body so it logs (1) every call with its args, and (2) any
     unhandled exception with its full traceback, then returns the exception

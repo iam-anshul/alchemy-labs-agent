@@ -5,3 +5,6 @@ __pycache__
 .venv
 .DS_Store
 workspace
+db_data
+app_dump.sql
+file_system_root

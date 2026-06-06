@@ -1,4 +1,4 @@
-from formats_pydantic import TaskSpec, Run
+from formats_pydantic import TaskSpec, QueryRun
 
 def indent_continuation(text: str) -> str:
     """For multi-line query/expects strings, indent continuation lines so

@@ -1,10 +1,10 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, LargeBinary, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
-import uuid
 
 
 class Doc(Base):
@@ -38,8 +38,8 @@ class Node(Base):
     start_page: Mapped[int | None] = mapped_column(Integer)
     end_page: Mapped[int | None] = mapped_column(Integer)
     summary: Mapped[str | None] = mapped_column(Text)
-    table_ids: Mapped[list[str] | None] = mapped_column(JSON)
-    child_ids: Mapped[list[str] | None] = mapped_column(JSON)
+    table_ids: Mapped[list[str] | None] = mapped_column(JSONB)
+    child_ids: Mapped[list[str] | None] = mapped_column(JSONB)
 
 
 class Page(Base):
@@ -53,7 +53,7 @@ class Page(Base):
     page_n: Mapped[int] = mapped_column(Integer, primary_key=True)
     prose_text: Mapped[str | None] = mapped_column(Text)
     page_summary: Mapped[str | None] = mapped_column(Text)
-    table_ids: Mapped[list[str] | None] = mapped_column(JSON)
+    table_ids: Mapped[list[str] | None] = mapped_column(JSONB)
     node_id: Mapped[str | None] = mapped_column(String, ForeignKey("nodes.node_id"))
 
 
@@ -67,7 +67,7 @@ class ExtractedTable(Base):
     source_page: Mapped[int | None] = mapped_column(Integer)
     title_guess: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
-    columns_json: Mapped[dict | list | None] = mapped_column(JSON)
+    columns_json: Mapped[dict | list | None] = mapped_column(JSONB)
     row_count: Mapped[int | None] = mapped_column(Integer)
     xlsx_path: Mapped[str | None] = mapped_column(Text)
     xlsx_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -85,7 +85,7 @@ class Report(Base):
     brief: Mapped[str] = mapped_column(Text, nullable=False)
     target_length: Mapped[str] = mapped_column(String, nullable=False, server_default="standard")
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="queued")
-    outline_json: Mapped[dict | list | None] = mapped_column(JSON)
+    outline_json: Mapped[dict | list | None] = mapped_column(JSONB)
     draft_md: Mapped[str | None] = mapped_column(Text)
     output_path: Mapped[str | None] = mapped_column(Text)
     n_sections: Mapped[int] = mapped_column(Integer, server_default="0")
@@ -107,10 +107,10 @@ class Query(Base):
     workspace_id: Mapped[str] = mapped_column(String, nullable=False)
     user_id: Mapped[str] = mapped_column(String, nullable=False)
     query_text: Mapped[str | None] = mapped_column(Text)
-    doc_ids_used: Mapped[list[str] | None] = mapped_column(JSON)
-    table_ids_used: Mapped[list[str] | None] = mapped_column(JSON)
+    doc_ids_used: Mapped[list[str] | None] = mapped_column(JSONB)
+    table_ids_used: Mapped[list[str] | None] = mapped_column(JSONB)
     answer: Mapped[str | None] = mapped_column(Text)
-    citations_json: Mapped[dict | list | None] = mapped_column(JSON)
+    citations_json: Mapped[dict | list | None] = mapped_column(JSONB)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -123,30 +123,34 @@ class Workspace(Base):
 
     workspace_id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, nullable=False)
-    title: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 
-class WorkspaceRun(Base):
+class QueryRun(Base): # this model name is needed to me renamed to QueryRun in the upcoming versions
     __tablename__ = "workspace_runs"
     __table_args__ = (
-        Index("idx_workspace_runs_ws_created", "workspace_id", "created_at"),
+        Index("idx_workspace_runs_ws_created", "workspace_id", "started_at"),
     )
-
-    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_query: Mapped[str] = mapped_column(Text, nullable=False)
+    # goal is the raw user message that kicked off this run. Kept
+    # separate from todo_md so message-history reconstruction can use it as
+    # the synthetic ModelRequest content.
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    replans_used: Mapped[int] = mapped_column(Integer, server_default="0")
+    replan_budget: Mapped[int] = mapped_column(Integer, server_default="3")
+    todo_md: Mapped[str | None] = mapped_column(Text)
     workspace_id: Mapped[str] = mapped_column(
         String,
         ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),
         nullable=False,
     )
-    # user_goal is the raw user message that kicked off this run. Kept
-    # separate from todo_md so message-history reconstruction can use it as
-    # the synthetic ModelRequest content.
-    user_goal: Mapped[str] = mapped_column(Text, nullable=False)
-    todo_md: Mapped[str | None] = mapped_column(Text)
+    query_id: Mapped[UUID] = mapped_column(UUID, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(UUID, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="running")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    query_counter: Mapped[int] = mapped_column(Integer, nullable=False)

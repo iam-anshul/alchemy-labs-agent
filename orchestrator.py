@@ -22,4 +22,3 @@ plannerAgent = Agent(
     output_type=PlanOutput,
     model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
 )
-

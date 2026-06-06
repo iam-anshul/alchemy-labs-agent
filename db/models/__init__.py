@@ -6,7 +6,7 @@ from db.models.models import (
     Query,
     Report,
     Workspace,
-    WorkspaceRun,
+    QueryRun,
 )
 
 __all__ = [
@@ -17,5 +17,5 @@ __all__ = [
     "Query",
     "Report",
     "Workspace",
-    "WorkspaceRun",
+    "QueryRun",
 ]

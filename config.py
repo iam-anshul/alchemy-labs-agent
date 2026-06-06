@@ -10,7 +10,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = "sqlite:///./data/app.db"
+    # Postgres only. Format: postgresql+psycopg://<user>:<password>@<host>:<port>/<db>
+    # The default points at a local Postgres on the standard port — override via
+    # .env for any real deployment.
+    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/agentic_rag"
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o"

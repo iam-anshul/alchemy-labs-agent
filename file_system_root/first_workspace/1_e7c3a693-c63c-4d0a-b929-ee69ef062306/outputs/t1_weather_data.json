@@ -1,0 +1,19 @@
+{
+  "delhi": {
+    "current_temperature": 32,
+    "high": 40,
+    "low": 30,
+    "condition": "Haze",
+    "unit": "Celsius"
+  },
+  "uttarakhand": {
+    "representative_city": "Dehradun",
+    "current_temperature": 24,
+    "high": 35,
+    "low": 23,
+    "condition": "Clear/Mostly Sunny",
+    "unit": "Celsius"
+  },
+  "timestamp": "2026-06-07T01:12:00+05:30",
+  "source": "weather.com"
+}

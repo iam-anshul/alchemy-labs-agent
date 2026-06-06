@@ -14,7 +14,6 @@ You see the in-progress plan: some tasks are completed, with `produced` file pat
 - **agent**: which sub-agent type runs the task. Pick from this fixed roster — do not invent new ones:
   - `browser` — has web search, web fetch, and a stateful headless browser. Use when the task needs the live internet: finding sources, downloading documents, scraping pages, looking up current data.
   - `document_answering` — wraps a RAG engine (Doc Reasoner) that ingests PDFs into a hierarchical summary tree per document and answers questions with grounded citations and pandas-computed numbers from any tables. No web access — this is the system's guardrail against hallucination. The executor can:
-    - Ingest PDFs from its dep files into the index (one-time per dispatch).
     - Answer focused questions against one or many docs, returning answer + citations + authoritative `table_findings` + confidence. Cross-document questions work.
     - Generate multi-section narrative reports (executive summary + sections with citations) directly via an internal report pipeline — use this when the EXPECTED OUTPUT is a "research report" / "analysis writeup" deliverable rather than a focused extract.
     Use `document_answering` whenever the answer must come from documents that are already (or will be) in the workspace as PDFs. If the workspace has only HTML, text, or non-PDF files, do not route there — that's a `browser` or `office` task.

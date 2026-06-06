@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, exists, select, func
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -18,9 +18,14 @@ from db.models import (
     Query,
     Report,
     Workspace,
-    WorkspaceRun,
+    QueryRun
 )
-
+# Pydantic QueryRun (the in-flight run object) shares its name with the ORM
+# QueryRun above, so it's aliased here to keep the two unambiguous in this file:
+# `QueryRun` = ORM row we persist, `QueryRunModel` = the Pydantic input.
+from formats_pydantic import QueryRun as QueryRunModel
+from uuid import UUID
+from formats_pydantic import QueryRun as queryRunFormat
 
 # ── Docs ──────────────────────────────────────────────────────────────────
 
@@ -193,7 +198,7 @@ def list_workspaces(db: Session, user_id: str) -> list[Workspace]:
 
 
 def get_or_create_workspace(
-    db: Session, workspace_id: str, user_id: str, title: str | None = None
+    db: Session, workspace_id: str, user_id: str
 ) -> Workspace:
     """Idempotent lookup-or-insert. Returns the existing workspace if one with
     this id exists; otherwise creates and returns a new one. Used by main.py's
@@ -201,33 +206,33 @@ def get_or_create_workspace(
     a single prompt."""
     existing = db.get(Workspace, workspace_id)
     if existing is not None:
-        return existing
-    return create_workspace(db, workspace_id=workspace_id, user_id=user_id, title=title)
+        return existing, True
+    return create_workspace(db, workspace_id=workspace_id, user_id=user_id), False
 
 
-# ── Workspace runs (planner chat history) ─────────────────────────────────
+# ── Query runs (planner chat history) ─────────────────────────────────
 
-def create_workspace_run(db: Session, **fields: Any) -> WorkspaceRun:
+def create_query_run(db: Session, **fields: Any) -> QueryRun:
     """Insert a workspace run row at run-start (typically status='running').
     The caller fills in todo_md and flips status to 'completed' or 'failed'
     later via update_workspace_run."""
-    run = WorkspaceRun(**fields)
+    run = QueryRun(**fields)
     db.add(run)
     db.commit()
     db.refresh(run)
     return run
 
 
-def get_workspace_run(db: Session, run_id: str) -> WorkspaceRun | None:
-    return db.get(WorkspaceRun, run_id)
+def get_workspace_run(db: Session, query_id: str) -> QueryRun | None:
+    return db.get(QueryRun, query_id)
 
 
 def update_workspace_run(
-    db: Session, run_id: str, **fields: Any
-) -> WorkspaceRun | None:
+    db: Session, query_id: str, **fields: Any
+) -> QueryRun | None:
     """Update mutable fields on a run (typically todo_md + status at end of
     run). Returns None if the row doesn't exist."""
-    run = db.get(WorkspaceRun, run_id)
+    run = db.get(QueryRun, query_id)
     if run is None:
         return None
     for key, value in fields.items():
@@ -239,15 +244,98 @@ def update_workspace_run(
 
 def list_recent_runs(
     db: Session, workspace_id: str, limit: int = 5
-) -> list[WorkspaceRun]:
+) -> list[QueryRun]:
     """Return the most recent runs in a workspace, in CHRONOLOGICAL order
     (oldest first). The reverse-on-DESC trick gives us the newest N runs
     cheaply while still presenting them to the planner as a coherent
     conversation timeline."""
     rows = list(db.scalars(
-        select(WorkspaceRun)
-        .where(WorkspaceRun.workspace_id == workspace_id)
-        .order_by(desc(WorkspaceRun.created_at))
+        select(QueryRun)
+        .where(QueryRun.workspace_id == workspace_id)
+        .order_by(desc(QueryRun.started_at))
         .limit(limit)
     ))
     return list(reversed(rows))
+
+#------------------------------------------my additions------------------------------------------------------
+# functions needed for chat router APIs
+# create workspace function which is already here
+# get workspace function
+# check if workspace exists function
+
+# if workspace exist function
+def does_workspace_exist(db: Session, workspace_id: str, user_id: str) -> bool:
+    return bool(db.scalar(
+        select(
+            exists().where(
+                Workspace.workspace_id == workspace_id,
+                Workspace.user_id == user_id,
+            )
+        )
+    ))
+
+# fetch query counter value
+def get_highest_query_counter(db: Session, workspace_id: str, user_id: UUID) -> int:
+    return db.query(func.max(QueryRun.query_counter)).filter(
+        QueryRun.user_id==user_id,
+        QueryRun.workspace_id==workspace_id
+        ).scalar()
+
+# create query run
+def register_query_run(
+    db: Session, run: QueryRunModel, final_todo: str | None
+) -> Exception | None:
+    """Persist the finished run to the workspace_runs table. Returns None on
+    success, or the Exception on failure (the caller surfaces it as a 500)."""
+    try:
+        thisQueryRun = QueryRun(
+            user_query=run.user_query,
+            goal=run.goal,
+            workspace=run.workspace,
+            started_at=run.started_at,
+            replans_used=run.replans_used,
+            replan_budget=run.replan_budget,
+            todo_md=final_todo,
+            workspace_id=run.workspace_id,
+            query_id=run.query_id,
+            user_id=run.user_id,
+            status=run.status,
+            query_counter=run.query_counter
+        )
+        db.add(thisQueryRun)
+        db.commit()
+        db.refresh(thisQueryRun)
+    except Exception as e:
+        return e
+    return None
+
+
+# delete a workspace and everything scoped to it
+def delete_workspace(db: Session, workspace_id: str, user_id: str) -> bool:
+    """Delete a workspace owned by ``user_id`` and ALL data scoped to it, in a
+    single transaction. Returns True if the workspace existed and was deleted,
+    False if no workspace with this id is owned by this user (caller maps that
+    to a 404).
+
+    Only QueryRun has a real FK + ON DELETE CASCADE to workspaces; the other
+    workspace-scoped tables (docs, nodes, pages, tables, queries, reports)
+    reference workspace_id as a plain string with no FK, so they are deleted
+    explicitly here. Nodes/pages/tables are deleted by matching workspace_id
+    directly rather than walking from docs, which is simpler and covers the
+    same rows.
+
+    The whole thing runs in one commit, so a failure rolls back every delete —
+    the workspace is removed wholesale or not at all."""
+    ws = db.get(Workspace, workspace_id)
+    if ws is None or ws.user_id != user_id:
+        return False
+
+    # Child tables first, then the workspace row last. QueryRun would cascade
+    # via the FK, but we delete it explicitly too so behaviour doesn't depend
+    # on the DB's cascade being present in every environment.
+    for model in (Node, Page, ExtractedTable, Query, Report, Doc, QueryRun):
+        db.execute(delete(model).where(model.workspace_id == workspace_id))
+    db.delete(ws)
+    db.commit()
+    return True
+    return None
