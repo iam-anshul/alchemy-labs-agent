@@ -12,7 +12,11 @@ class Doc(Base):
     __table_args__ = (Index("idx_docs_ws", "workspace_id"),)
 
     doc_id: Mapped[str] = mapped_column(String, primary_key=True)
-    workspace_id: Mapped[str] = mapped_column(String, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     uploaded_by_user_id: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
     source_path: Mapped[str | None] = mapped_column(Text)
@@ -31,8 +35,12 @@ class Node(Base):
 
     node_id: Mapped[str] = mapped_column(String, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(String, nullable=False)
-    doc_id: Mapped[str] = mapped_column(String, ForeignKey("docs.doc_id"), nullable=False)
-    parent_id: Mapped[str | None] = mapped_column(String, ForeignKey("nodes.node_id"))
+    doc_id: Mapped[str] = mapped_column(
+        String, ForeignKey("docs.doc_id", ondelete="CASCADE"), nullable=False
+    )
+    parent_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("nodes.node_id", ondelete="SET NULL")
+    )
     depth: Mapped[int | None] = mapped_column(Integer)
     title: Mapped[str | None] = mapped_column(Text)
     start_page: Mapped[int | None] = mapped_column(Integer)
@@ -48,13 +56,15 @@ class Page(Base):
 
     workspace_id: Mapped[str] = mapped_column(String, nullable=False)
     doc_id: Mapped[str] = mapped_column(
-        String, ForeignKey("docs.doc_id"), primary_key=True
+        String, ForeignKey("docs.doc_id", ondelete="CASCADE"), primary_key=True
     )
     page_n: Mapped[int] = mapped_column(Integer, primary_key=True)
     prose_text: Mapped[str | None] = mapped_column(Text)
     page_summary: Mapped[str | None] = mapped_column(Text)
     table_ids: Mapped[list[str] | None] = mapped_column(JSONB)
-    node_id: Mapped[str | None] = mapped_column(String, ForeignKey("nodes.node_id"))
+    node_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("nodes.node_id", ondelete="SET NULL")
+    )
 
 
 class ExtractedTable(Base):
@@ -63,7 +73,9 @@ class ExtractedTable(Base):
 
     table_id: Mapped[str] = mapped_column(String, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(String, nullable=False)
-    doc_id: Mapped[str] = mapped_column(String, ForeignKey("docs.doc_id"), nullable=False)
+    doc_id: Mapped[str] = mapped_column(
+        String, ForeignKey("docs.doc_id", ondelete="CASCADE"), nullable=False
+    )
     source_page: Mapped[int | None] = mapped_column(Integer)
     title_guess: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
@@ -80,7 +92,11 @@ class Report(Base):
     __table_args__ = (Index("idx_reports_ws_user", "workspace_id", "user_id", "created_at"),)
 
     report_id: Mapped[str] = mapped_column(String, primary_key=True)
-    workspace_id: Mapped[str] = mapped_column(String, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     user_id: Mapped[str] = mapped_column(String, nullable=False)
     brief: Mapped[str] = mapped_column(Text, nullable=False)
     target_length: Mapped[str] = mapped_column(String, nullable=False, server_default="standard")
@@ -104,7 +120,11 @@ class Query(Base):
     )
 
     query_id: Mapped[str] = mapped_column(String, primary_key=True)
-    workspace_id: Mapped[str] = mapped_column(String, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     user_id: Mapped[str] = mapped_column(String, nullable=False)
     query_text: Mapped[str | None] = mapped_column(Text)
     doc_ids_used: Mapped[list[str] | None] = mapped_column(JSONB)

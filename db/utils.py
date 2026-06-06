@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import delete, desc, exists, select, func
+from sqlalchemy import desc, exists, select, func
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -312,30 +312,9 @@ def register_query_run(
 
 # delete a workspace and everything scoped to it
 def delete_workspace(db: Session, workspace_id: str, user_id: str) -> bool:
-    """Delete a workspace owned by ``user_id`` and ALL data scoped to it, in a
-    single transaction. Returns True if the workspace existed and was deleted,
-    False if no workspace with this id is owned by this user (caller maps that
-    to a 404).
-
-    Only QueryRun has a real FK + ON DELETE CASCADE to workspaces; the other
-    workspace-scoped tables (docs, nodes, pages, tables, queries, reports)
-    reference workspace_id as a plain string with no FK, so they are deleted
-    explicitly here. Nodes/pages/tables are deleted by matching workspace_id
-    directly rather than walking from docs, which is simpler and covers the
-    same rows.
-
-    The whole thing runs in one commit, so a failure rolls back every delete —
-    the workspace is removed wholesale or not at all."""
     ws = db.get(Workspace, workspace_id)
     if ws is None or ws.user_id != user_id:
         return False
-
-    # Child tables first, then the workspace row last. QueryRun would cascade
-    # via the FK, but we delete it explicitly too so behaviour doesn't depend
-    # on the DB's cascade being present in every environment.
-    for model in (Node, Page, ExtractedTable, Query, Report, Doc, QueryRun):
-        db.execute(delete(model).where(model.workspace_id == workspace_id))
-    db.delete(ws)
+    db.delete(ws)   # DB cascade removes docs/nodes/pages/tables/queries/reports/runs
     db.commit()
     return True
-    return None
