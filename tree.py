@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from api.events import EventSink
 from config import get_settings
 from db import utils
-from db.models import Page
+from db.models import Node, Page
 
 # All tunables come from config / .env — see Settings in config.py.
 
@@ -319,11 +319,21 @@ async def build_tree(
     for n in all_nodes:
         n.depth = depth_map.get(n.node_id, 0)
 
-    # persist nodes
+    # Persist all nodes + the pages.node_id backfill in ONE transaction.
+    #
+    # nodes.parent_id is a self-referential FK and pages.node_id FKs to
+    # nodes.node_id. Both are declared DEFERRABLE INITIALLY DEFERRED (see
+    # db/models/models.py + migration 03d439cba9e5), so Postgres validates them
+    # at COMMIT over the complete row set rather than per row at insert. That
+    # makes this batch insert order-independent: children may be added before
+    # their parent and the tree still commits, while a genuinely dangling
+    # parent_id is still rejected at commit. One add_all + one commit keeps the
+    # whole tree atomic — a mid-write failure rolls everything back (no orphan
+    # nodes, no half-built hierarchy). Field values are identical to the old
+    # per-node loop.
     log.info("persisting %d nodes to db ...", len(all_nodes))
-    for n in all_nodes:
-        utils.create_node(
-            db,
+    db.add_all([
+        Node(
             node_id=n.node_id,
             workspace_id=workspace_id,
             doc_id=doc_id,
@@ -336,8 +346,11 @@ async def build_tree(
             table_ids=n.table_ids or [],
             child_ids=n.child_ids or [],
         )
+        for n in all_nodes
+    ])
 
-    # backfill pages.node_id
+    # backfill pages.node_id — same transaction as the node inserts so the FK
+    # from pages.node_id -> nodes.node_id is satisfied at the single commit.
     leaf_for_page = {
         pg: leaf.node_id
         for leaf in leaves

@@ -38,8 +38,17 @@ class Node(Base):
     doc_id: Mapped[str] = mapped_column(
         String, ForeignKey("docs.doc_id", ondelete="CASCADE"), nullable=False
     )
+    # DEFERRABLE INITIALLY DEFERRED: a doc's node tree is inserted in one
+    # transaction, and a child's parent row may be inserted after the child.
+    # Deferring this self-referential FK to commit time lets the whole tree be
+    # written order-independently — the check still runs (a genuine dangling
+    # parent_id fails at commit), just over the complete, consistent set.
     parent_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("nodes.node_id", ondelete="SET NULL")
+        String,
+        ForeignKey(
+            "nodes.node_id", ondelete="SET NULL",
+            deferrable=True, initially="DEFERRED",
+        ),
     )
     depth: Mapped[int | None] = mapped_column(Integer)
     title: Mapped[str | None] = mapped_column(Text)
@@ -62,8 +71,15 @@ class Page(Base):
     prose_text: Mapped[str | None] = mapped_column(Text)
     page_summary: Mapped[str | None] = mapped_column(Text)
     table_ids: Mapped[list[str] | None] = mapped_column(JSONB)
+    # Deferred for the same reason as nodes.parent_id: pages.node_id is
+    # backfilled in the same transaction that inserts the nodes, so the FK
+    # target may not exist yet at insert time. Checked at commit.
     node_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("nodes.node_id", ondelete="SET NULL")
+        String,
+        ForeignKey(
+            "nodes.node_id", ondelete="SET NULL",
+            deferrable=True, initially="DEFERRED",
+        ),
     )
 
 

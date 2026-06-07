@@ -10,6 +10,10 @@ from supertokens_python.framework.fastapi import get_middleware
 from supertokens_python.recipe import session, emailpassword
 
 from api.routes.chat import chat_router
+from api.routes.documents import document_router
+from api import ingest
+
+from contextlib import asynccontextmanager
 
 import secrets
 
@@ -25,13 +29,28 @@ SUPERTOKENS_URI=os.getenv("SUPERTOKENS_URI")
 
 security = HTTPBasic()
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start the doc-reasoner ingest workers on boot so any document uploaded via
+    # the /documents endpoint actually gets parsed + indexed. Without this, an
+    # upload enqueues a doc that nothing drains, leaving it stuck at status
+    # 'queued' forever (the /chat/run path starts its own workers, but standalone
+    # uploads have no other trigger). shutdown_workers drains the queue on exit
+    # so an in-flight ingest finishes before the process dies.
+    ingest.start_workers()
+    yield
+    await ingest.shutdown_workers()
+
+
 server = FastAPI(
     title="alchemy labs agentic server",
     description="api backend for sql alchemy",
     version="0.1",
     openapi_tags=[],
-    docs_url=None,  
-    redoc_url=None 
+    docs_url=None,
+    redoc_url=None,
+    lifespan=lifespan,
 )
 
 @server.get("/health")
@@ -120,6 +139,11 @@ server.include_router(
     prefix="/chat",
     tags=["chat"]
 )
+
+server.include_router(
+    document_router
+)
+
 
 if __name__ == "__main__":
     uvicorn.run("start_server:server", host="0.0.0.0", port=8000, reload=True)

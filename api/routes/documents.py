@@ -5,7 +5,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 
-from api.auth import get_current_user
 from api.events import bus
 from api.ingest import enqueue_ingest
 from api.schemas import DocumentAcceptedResponse, DocumentResponse
@@ -13,7 +12,10 @@ from config import get_settings
 from db import SessionLocal, utils
 from shared import sse_stream
 
-router = APIRouter(prefix="/v1/workspaces/{ws_id}/documents", tags=["documents"])
+from supertokens_python.recipe.session import SessionContainer
+from supertokens_python.recipe.session.framework.fastapi import verify_session
+
+document_router = APIRouter(prefix="/v1/workspaces/{ws_id}/documents", tags=["documents"])
 
 # Internal, non-HTTP helpers shared by the route handlers below and the doc
 # sub-agent's tools. Each opens its own short-lived DB session and validates
@@ -55,13 +57,15 @@ def get_local_document(workspace_id: str, doc_id: str) -> DocumentResponse | Non
             return None
         return DocumentResponse.model_validate(doc)
 
-@router.post("", status_code=202, response_model=DocumentAcceptedResponse)
+@document_router.post("", status_code=202, response_model=DocumentAcceptedResponse)
 async def upload_document(
     ws_id: str,
     file: UploadFile,
-    current_user: str = Depends(get_current_user),
+    session: SessionContainer = Depends(verify_session()),
 ) -> DocumentAcceptedResponse:
     """Upload a document for async ingestion (parse + tree build)."""
+    current_user = session.get_user_id()
+
     settings = get_settings()
     doc_id = f"doc_{uuid.uuid4().hex[:12]}"
     ext = Path(file.filename or "upload").suffix
@@ -87,21 +91,22 @@ async def upload_document(
     stream_url = f"/v1/workspaces/{ws_id}/documents/{doc_id}/stream"
     return DocumentAcceptedResponse(doc_id=doc_id, status="queued", stream_url=stream_url)
 
-
-@router.get("", response_model=list[DocumentResponse])
+@document_router.get("", response_model=list[DocumentResponse])
 async def list_documents(
     ws_id: str,
-    current_user: str = Depends(get_current_user),
+    session: SessionContainer = Depends(verify_session()),
 ) -> list[DocumentResponse]:
     """List all documents in a workspace."""
-    return list_local_documents(ws_id)
+    with SessionLocal() as db:
+        docs = utils.list_docs(db, ws_id)
+    return [DocumentResponse.model_validate(d) for d in docs]
 
 
-@router.get("/{doc_id}", response_model=DocumentResponse)
+@document_router.get("/{doc_id}", response_model=DocumentResponse)
 async def get_document(
     ws_id: str,
     doc_id: str,
-    current_user: str = Depends(get_current_user),
+    session: SessionContainer = Depends(verify_session()),
 ) -> DocumentResponse:
     """Get a single document by id."""
     doc = get_local_document(ws_id, doc_id)
@@ -110,12 +115,12 @@ async def get_document(
     return doc
 
 
-@router.get("/{doc_id}/stream")
+@document_router.get("/{doc_id}/stream")
 async def stream_document_ingest(
     ws_id: str,
     doc_id: str,
     request: Request,
-    current_user: str = Depends(get_current_user),
+    session: SessionContainer = Depends(verify_session()),
 ):
     """SSE stream of ingest progress for a document."""
     with SessionLocal() as db:
