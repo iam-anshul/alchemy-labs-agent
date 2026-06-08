@@ -76,8 +76,8 @@ class AnswerResult(BaseModel):
         ),
     )
     save_to_file: bool = Field(
-        default=False,
-        description="True if the user's query explicitly asks to save the answer as a file.",
+        default=True,
+        description="Falsdr if the user's query explicitly asks not to save the answer as a file.",
     )
     suggested_filename: str | None = Field(
         default=None,

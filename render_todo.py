@@ -50,7 +50,7 @@ def render_task(task: TaskSpec) -> str:
     )
 
 
-def render_todo(run: Run) -> str:
+def render_todo(run: QueryRun) -> str:
     parts = []
 
     # Header

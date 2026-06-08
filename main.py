@@ -4,7 +4,6 @@ from pathlib import Path
 from orchestrator import plannerAgent
 from browser_agent import BrowserExecutor
 from office_agent import run_office_executor
-from doc_agent import run_doc_executor
 from api.ingest import start_workers, shutdown_workers
 from db import SessionLocal
 from db import utils as db_utils

@@ -127,6 +127,8 @@ class Report(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # I am making a report name here so that i can use that name in api to find the name of reports
+    report_name: Mapped[str] =  mapped_column(String, nullable=False)
 
 
 class Query(Base):

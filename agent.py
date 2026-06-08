@@ -858,7 +858,7 @@ def _safe_filename(name: str, max_len: int = 80) -> str:
 
 async def _maybe_save_answer(
     *,
-    workspace_id: str,
+    path_to_subdir: str,
     query: str,
     query_id: str,
     answer_result: AnswerResult,
@@ -868,12 +868,9 @@ async def _maybe_save_answer(
 ) -> str | None:
     if not answer_result.save_to_file:
         return None
-    s = get_settings()
-    if not s.workspace_output_dir:
-        return None
 
     filename = _safe_filename(answer_result.suggested_filename or f"{query_id}.md")
-    out_dir = Path(s.workspace_output_dir) / workspace_id
+    out_dir = Path(path_to_subdir/"outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / filename
 
@@ -892,6 +889,7 @@ async def _maybe_save_answer(
 
 
 async def answer_query(
+    workspace_subdir_path: str,
     workspace_id: str,
     user_id: str,
     query: str,
@@ -1071,7 +1069,7 @@ async def answer_query(
         output_path: str | None = None
         if last_ans is not None:
             output_path = await _maybe_save_answer(
-                workspace_id=workspace_id,
+                path_to_subdir=workspace_subdir_path,
                 query=query,
                 query_id=query_id,
                 answer_result=last_ans,

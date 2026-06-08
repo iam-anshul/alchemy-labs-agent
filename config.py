@@ -35,10 +35,10 @@ class Settings(BaseSettings):
     agent_max_followups_per_hop: int = 3
 
     # Answer file output
-    workspace_output_dir: str = "data/workspaces"
+    workspace_output_dir: str = "data/workspaces" # No longer in use, need to remove
 
     # Report drafting
-    report_output_dir: str = "data/reports"
+    report_output_dir: str = "data/reports" # No longer in use, need to remove
     report_max_hops: int = 2
     report_section_concurrency: int = 2
     agent_report_retrieval_request_limit: int = 120

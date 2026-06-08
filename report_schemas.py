@@ -77,6 +77,7 @@ class ReportResult(BaseModel):
     n_words: int
     n_hops: int
     latency_ms: int
+    report_name: str
 
 
 class ExecutiveSummary(BaseModel):

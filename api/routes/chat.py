@@ -1,8 +1,10 @@
 import os
 import uuid
 from pathlib import Path
-from orchestrator import plannerAgent
-from browser_agent import BrowserExecutor
+from orchestrator import plannerAgent, PlannerDeps
+from browser_agent import BrowserExecutor, ExecutorResult
+from agent_schemas import QueryAnswer
+from report_schemas import ReportResult
 from office_agent import run_office_executor
 from api.ingest import start_workers, shutdown_workers
 from db import SessionLocal
@@ -15,12 +17,15 @@ import asyncio
 import shutil
 from uuid import uuid4, UUID
 
+
 from report import draft_report
 from agent import answer_query
 
 from fastapi import Depends, APIRouter, HTTPException
 from supertokens_python.recipe.session.framework.fastapi import verify_session
 from supertokens_python.recipe.session import SessionContainer
+
+from api.events import EventSink, bus
 
 from dotenv import load_dotenv
 import os
@@ -42,7 +47,7 @@ def make_workspace(workspace_path):
     os.makedirs(workspace_path)
     return workspace_path
 
-def write_todo_atomic(run: Run) -> None:
+def write_todo_atomic(run: QueryRun) -> None:
     todo_path = Path(run.workspace) / "todo.md"
     tmp = todo_path.with_suffix(".md.tmp")
     tmp.write_text(render_todo(run), encoding="utf-8")
@@ -134,7 +139,6 @@ def _build_message_history_from_prior_runs(workspace_id: str, current_run_id: st
         messages.append(ModelResponse(parts=[TextPart(content=r.todo_md)]))
     return messages
 
-
 async def planner(run: QueryRun) -> PlanOutput:
     """Run the planner LLM.
 
@@ -158,6 +162,7 @@ async def planner(run: QueryRun) -> PlanOutput:
         planner_run = await plannerAgent.run(
             user_prompt=run.goal,
             message_history=message_history or None,
+            deps=PlannerDeps(workspace_name=run.workspace_id)
         )
         return planner_run.output
 
@@ -186,20 +191,21 @@ async def planner(run: QueryRun) -> PlanOutput:
         "warrant a change, return the revised plan. Otherwise return the "
         "plan unchanged."
     )
-    planner_run = await plannerAgent.run(user_prompt=replan_prompt)
+    planner_run = await plannerAgent.run(user_prompt=replan_prompt, deps=PlannerDeps(workspace_name=run.workspace_id))
     return planner_run.output
     
 async def dispatch_executor_agent(
     task_spec: TaskSpec,
     dep_files: list[str],
-    workspace: Path,
+    subdir_path: Path,
     workspace_id: str,
     user_id: UUID,
+    query_id: str
 ) -> str:
-
+    # Planner should have the tools to list document and find the doc id with its name
     match task_spec.agent:
         case "browser":
-            browser = BrowserExecutor( workspace=workspace, model=MODEL, headless=True, max_failures=8)
+            browser = BrowserExecutor( workspace=subdir_path, model=MODEL, headless=True, max_failures=8)
             browser_result = await browser.run(
                 query=task_spec.query,
                 expects=task_spec.expects,
@@ -208,24 +214,47 @@ async def dispatch_executor_agent(
             return browser_result
         case "office":
             office_result = await run_office_executor(
-                workspace=workspace,
+                workspace=subdir_path,
                 query=task_spec.query,
                 expects=task_spec.expects,
                 dep_files=dep_files
                 )
             return office_result
         case "document_answering":
-            if task_spec.doc_answering_mode == "ASK":
-                # doc id filter for filename to be shown in planner
-                answer_query(
-                    workspace_id=workspace_id,
-                    user_id=user_id,
-                    query=task_spec.query,
-                    doc_id=...,
+            channel_id = f"query:{query_id}"
+            this_sink = EventSink(bus=bus, channel_id=channel_id, query_id=query_id)
+            try:
+                if task_spec.doc_deps.doc_answering_mode == "ASK":
+                    doc_ask_result = await answer_query(
+                        workspace_subdir_path=subdir_path,
+                        workspace_id=workspace_id,
+                        user_id=user_id,
+                        query=task_spec.query,
+                        doc_ids=task_spec.doc_deps.doc_ids,
+                        sink=this_sink
+                    )
+                    return ExecutorResult(
+                        produced=[str(Path(doc_ask_result.output_path).relative_to(subdir_path))],
+                        notes=f"Page targets: {doc_ask_result.page_targets} with confidence: {doc_ask_result.confidence} \n citations: {doc_ask_result.citations}"
+                    )
                     
-                )
-            elif task_spec.doc_answering_mode == "REPORT":
-                draft_report()
+                elif task_spec.doc_deps.doc_answering_mode == "REPORT":
+                    doc_draft_result = await draft_report(
+                        workspace_subdir_path=subdir_path,
+                        workspace_id=workspace_id,
+                        user_id=str(user_id),
+                        brief=task_spec.query,
+                        doc_ids=task_spec.doc_deps.doc_ids,
+                        target_length=task_spec.doc_deps.target_length,
+                        report_id=task_spec.doc_deps.report_id,
+                        sink=this_sink # "Compare ESG strategies..."
+                    )
+                    return ExecutorResult(
+                        produced=[str(Path(doc_draft_result.output_path).relative_to(subdir_path))],
+                        notes=doc_draft_result.brief
+                    )
+            finally:
+                bus.close(channel_id)
 
 def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bool, str]:
     """Verify each produced path exists under the workspace and is non-empty.
@@ -405,6 +434,7 @@ async def create_chat(
                         Path(absolute_workspace_path_with_subdir),
                         workspace_id=workspace_name,
                         user_id=user_id,
+                        query_id=str(query_id)
                     )
                     if not result.error:
                         break
@@ -480,4 +510,25 @@ async def create_chat(
     if thisRun.plan is None:
         raise HTTPException(status_code=500, detail="Planner failed to produce a plan")
     return thisRun.plan
+
+
+@chat_router.get("/get_docs_by_name")
+async def get_docs_by_name(
+        workspace_name: str, # workspace name will be the workspace_id in db
+        doc_name: str,
+        session: SessionContainer = Depends(verify_session())
+    ) -> list[str]:
+    with SessionLocal() as db:
+            doc_ids = db_utils.get_docID_by_name(db, workspace_name, doc_name)
+    return doc_ids
+
+@chat_router.get("/get_reports_by_name")
+async def get_reports_by_name(
+    workspace_name: str,
+    report_name: str,
+    session: SessionContainer = Depends(verify_session())
+) -> str:
+    with SessionLocal() as db:
+        report_ids = db_utils.get_reportID_by_name(db, workspace_name, report_name)
+    return report_ids
 

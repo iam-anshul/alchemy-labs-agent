@@ -318,3 +318,19 @@ def delete_workspace(db: Session, workspace_id: str, user_id: str) -> bool:
     db.delete(ws)   # DB cascade removes docs/nodes/pages/tables/queries/reports/runs
     db.commit()
     return True
+
+# get document_id by document name
+def get_docID_by_name(db: Session, workspace_id: str, doc_name:str):
+    doc_ids = db.query(Doc.doc_id).filter(
+        Doc.workspace_id==workspace_id,
+        Doc.title==doc_name
+    ).all()
+    return [id[0] for id in doc_ids]
+
+def get_reportID_by_name(db: Session, workspace_id: str, report_name:str):
+    report_ids = db.query(Report.report_id).filter(
+        Report.report_name==report_name,
+        Report.workspace_id==workspace_id
+    ).all()
+    return [id[0] for id in report_ids]
+

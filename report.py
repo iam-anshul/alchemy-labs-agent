@@ -348,9 +348,8 @@ async def _write_executive_summary(
     return out.summary.strip()
 
 
-def _save_report_to_disk(report_id: str, workspace_id: str, draft_md: str) -> str:
-    s = get_settings()
-    out_dir = Path(s.report_output_dir) / workspace_id
+def _save_report_to_disk(report_id: str, path_to_subdir: str, draft_md: str) -> str:
+    out_dir = Path(path_to_subdir/"outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / _safe_filename(f"{report_id}.md")
     out_path.write_text(draft_md, encoding="utf-8")
@@ -690,6 +689,7 @@ def _persist_report(
             "n_words": result.n_words,
             "n_hops": result.n_hops,
             "latency_ms": result.latency_ms,
+            "report_name": _safe_filename(f"{report_id}.md")
         }
         if existing:
             utils.update_report(db, report_id, **fields)
@@ -711,6 +711,7 @@ def _persist_report(
 
 async def draft_report(
     *,
+    workspace_subdir_path: str,
     workspace_id: str,
     user_id: str,
     brief: str,
@@ -732,6 +733,7 @@ async def draft_report(
             brief=brief,
             target_length=target_length,
             status="running",
+            report_name=_safe_filename(f"{report_id}.md")
         )
 
     await sink.publish("report_started", {
@@ -781,7 +783,7 @@ async def draft_report(
         outline.abstract = final_summary
         draft_md = _stitch_draft(outline, section_drafts, summary=final_summary)
 
-        output_path = _save_report_to_disk(report_id, workspace_id, draft_md)
+        output_path = _save_report_to_disk(report_id, workspace_subdir_path, draft_md)
         await sink.publish("saved", {"path": output_path})
 
         result = ReportResult(
@@ -795,6 +797,7 @@ async def draft_report(
             n_words=_count_words(draft_md),
             n_hops=n_hops,
             latency_ms=int((time.monotonic() - t0) * 1000),
+            report_name=_safe_filename(f"{report_id}.md")
         )
         _persist_report(
             workspace_id=workspace_id,
