@@ -9,19 +9,20 @@ from office_agent import run_office_executor
 from api.ingest import start_workers, shutdown_workers
 from db import SessionLocal
 from db import utils as db_utils
-from formats_pydantic import QueryRun, PlanOutput, TaskSpec
+from formats_pydantic import QueryRun, PlanOutput, TaskSpec, ChatAcceptedResponse
 from render_todo import render_todo
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart, TextPart
 from time import time
 import asyncio
 import shutil
 from uuid import uuid4, UUID
+from shared import sse_stream
 
 
 from report import draft_report
 from agent import answer_query
 
-from fastapi import Depends, APIRouter, HTTPException
+from fastapi import Depends, APIRouter, HTTPException, Request
 from supertokens_python.recipe.session.framework.fastapi import verify_session
 from supertokens_python.recipe.session import SessionContainer
 
@@ -139,7 +140,7 @@ def _build_message_history_from_prior_runs(workspace_id: str, current_run_id: st
         messages.append(ModelResponse(parts=[TextPart(content=r.todo_md)]))
     return messages
 
-async def planner(run: QueryRun) -> PlanOutput:
+async def planner(run: QueryRun, sink: EventSink) -> PlanOutput:
     """Run the planner LLM.
 
     Initial call (no plan on the run yet): generate the plan from the user's
@@ -152,7 +153,9 @@ async def planner(run: QueryRun) -> PlanOutput:
     unchanged or a revised version. NO history injection — replans are
     scoped to the in-flight run only, per design.
     """
+
     if not run.plan:
+        await sink.publish("Planner is planning", {})
         message_history: list[ModelMessage] = []
         if run.query_counter > 1:
             message_history = _build_message_history_from_prior_runs(
@@ -164,6 +167,7 @@ async def planner(run: QueryRun) -> PlanOutput:
             message_history=message_history or None,
             deps=PlannerDeps(workspace_name=run.workspace_id)
         )
+        await sink.publish("Planner has planned", {})
         return planner_run.output
 
     current_todo = render_todo(run)
@@ -191,6 +195,7 @@ async def planner(run: QueryRun) -> PlanOutput:
         "warrant a change, return the revised plan. Otherwise return the "
         "plan unchanged."
     )
+    await sink.publish("Checking if planner needs to replan", {})
     planner_run = await plannerAgent.run(user_prompt=replan_prompt, deps=PlannerDeps(workspace_name=run.workspace_id))
     return planner_run.output
     
@@ -200,8 +205,10 @@ async def dispatch_executor_agent(
     subdir_path: Path,
     workspace_id: str,
     user_id: UUID,
-    query_id: str
+    query_id: str,
+    sink: EventSink
 ) -> str:
+    await sink.publish(f"{task_spec.agent} agent is running", {})
     # Planner should have the tools to list document and find the doc id with its name
     match task_spec.agent:
         case "browser":
@@ -211,6 +218,7 @@ async def dispatch_executor_agent(
                 expects=task_spec.expects,
                 dep_files=dep_files
             )
+            await sink.publish(f"{task_spec.agent} agent has returned the response", {})
             return browser_result
         case "office":
             office_result = await run_office_executor(
@@ -219,12 +227,15 @@ async def dispatch_executor_agent(
                 expects=task_spec.expects,
                 dep_files=dep_files
                 )
+            await sink.publish(f"{task_spec.agent} agent has returned the response", {})
             return office_result
         case "document_answering":
             channel_id = f"query:{query_id}"
             this_sink = EventSink(bus=bus, channel_id=channel_id, query_id=query_id)
             try:
                 if task_spec.doc_deps.doc_answering_mode == "ASK":
+                    await sink.publish("Searching in the document", {})
+
                     doc_ask_result = await answer_query(
                         workspace_subdir_path=subdir_path,
                         workspace_id=workspace_id,
@@ -233,12 +244,15 @@ async def dispatch_executor_agent(
                         doc_ids=task_spec.doc_deps.doc_ids,
                         sink=this_sink
                     )
+                    await sink.publish(f"{task_spec.agent} agent has returned the response", {})
                     return ExecutorResult(
                         produced=[str(Path(doc_ask_result.output_path).relative_to(subdir_path))],
                         notes=f"Page targets: {doc_ask_result.page_targets} with confidence: {doc_ask_result.confidence} \n citations: {doc_ask_result.citations}"
                     )
                     
                 elif task_spec.doc_deps.doc_answering_mode == "REPORT":
+                    await sink.publish("Drafting report", {})
+
                     doc_draft_result = await draft_report(
                         workspace_subdir_path=subdir_path,
                         workspace_id=workspace_id,
@@ -249,6 +263,7 @@ async def dispatch_executor_agent(
                         report_id=task_spec.doc_deps.report_id,
                         sink=this_sink # "Compare ESG strategies..."
                     )
+                    await sink.publish(f"{task_spec.agent} agent has returned the response", {})
                     return ExecutorResult(
                         produced=[str(Path(doc_draft_result.output_path).relative_to(subdir_path))],
                         notes=doc_draft_result.brief
@@ -314,17 +329,61 @@ async def delete_workspace(
 
     return workspace_name
 
-@chat_router.post("/run", response_model=PlanOutput)
-async def create_chat(
-    workspace_name: str, # workspace name will be the workspace_id in db
+@chat_router.post("/user_chat", response_model=ChatAcceptedResponse)
+async def user_chat(
+    workspace_name: str,
     query: str,
     session: SessionContainer = Depends(verify_session())
 ):
-    # whenever an agent creates a file we need to show that in events
-    # make apis for file content render to the ui
-    user_id = session.get_user_id()
-    # generate query id
     query_id = uuid4()
+    asyncio.create_task(
+        execute_chat(
+            workspace_name=workspace_name,
+            query=query,
+            query_id=query_id,
+            user_id=session.get_user_id()
+        )
+    )
+    stream_url = f"/chat/{query_id}/stream"
+    return ChatAcceptedResponse(query_id=query_id, stream_url=stream_url)
+
+async def execute_chat(
+    workspace_name: str,
+    query: str,
+    query_id,
+    user_id
+):
+    channel_id = f"query:{query_id}"
+    sink = EventSink(bus=bus, channel_id=channel_id)
+    try:
+        await create_chat(
+                workspace_name=workspace_name,
+                query=query,
+                query_id=query_id,
+                user_id=user_id,
+                sink=sink
+            )
+    finally:
+        # Close the channel so the SSE stream terminates cleanly instead of
+        # hanging on keep-alive pings forever after the work finishes.
+        bus.close(channel_id)
+
+async def create_chat(
+    workspace_name: str, # workspace name will be the workspace_id in db
+    query: str,
+    query_id: UUID,
+    user_id: UUID,
+    sink: EventSink = EventSink()
+):
+
+    await sink.publish(
+        "chat_started",
+        {
+            "query_id": query_id,
+            "query": query,
+            "workspace_id": workspace_name
+        }
+    )
 
     #Check if the workspace exists or not, check in local filesystem and in the database as well.
 
@@ -371,7 +430,7 @@ async def create_chat(
     # a doc the planner kicked off late still finishes before the process dies.
     start_workers(n=2)
     try:
-        thisRun.plan = await planner(thisRun)
+        thisRun.plan = await planner(thisRun, sink)
 
         # Per-run filesystem subdir under the chat's workspace folder. Sub-agents'
         # _resolve_inside guard keeps them confined to THIS subdir, so cross-run
@@ -385,6 +444,7 @@ async def create_chat(
         thisRun.workspace = absolute_workspace_path_with_subdir
         make_workspace(Path(absolute_workspace_path_with_subdir))
         # write todo
+        await sink.publish("writing todo.md", {})
         write_todo_atomic(thisRun)
         # let's fore the tasks ony by one and not concurrently.
         while True:
@@ -434,22 +494,28 @@ async def create_chat(
                         Path(absolute_workspace_path_with_subdir),
                         workspace_id=workspace_name,
                         user_id=user_id,
-                        query_id=str(query_id)
+                        query_id=str(query_id),
+                        sink=sink
                     )
                     if not result.error:
+                        await sink.publish(f"Agent: {task.agent} completed its task: {task.id} successfully", {"Agent":task.agent, "task":task.id})
                         break
                     print(f"[{task.id}] attempt {attempt}/{MAX_DISPATCH_ATTEMPTS} failed: {result.error}")
                     if attempt < MAX_DISPATCH_ATTEMPTS:
+                        await sink.publish(f"Agent {task.agent} has failed its task: {task.id}, re-attempting task", {"agent":task.agent, "attempt":attempt, "error":task.error})
                         await asyncio.sleep(2 * attempt)  # linear backoff: 2s, 4s
 
                 if result.error:
+                    await sink.publish(f"Maximum attemps reached for task {task.id}, task failed", {"error":task.error})
                     task.status = "failed"
                     task.error = f"after {MAX_DISPATCH_ATTEMPTS} attempts: {result.error}"
                 else:
                     # files were written by the executor's write_file tool during
                     # its run; we only verify they exist and are non-empty.
+                    await sink.publish("Validating agent's produced file", {"agent":task.agent})
                     ok, status = validate_files_exist(absolute_workspace_path_with_subdir, result.produced)
                     if not ok:
+                        await sink.publish(f"Validation failed for agent's produced file", {"agent":{task.agent}, "error":status})
                         raise HTTPException(status_code=500, detail=f"file validation for 'produced' of the task failed with status: {status}")
                     task.status = "completed"
                     task.produced = result.produced
@@ -461,12 +527,13 @@ async def create_chat(
                 # exactly when the planner most needs to see the state and decide
                 # whether to revise.
                 if thisRun.replans_used < thisRun.replan_budget:
-                    new_plan = await planner(thisRun)
+                    new_plan = await planner(thisRun, sink)
                     if _plan_signature(new_plan) != _plan_signature(thisRun.plan):
                         thisRun.plan = _merge_plan(thisRun.plan, new_plan)
                         thisRun.replans_used += 1
 
                 # always rewrite todo.md so status, produced, and any replan land on disk
+                await sink.publish("Writing final todo.md", {})
                 write_todo_atomic(thisRun)
     finally:
 
@@ -511,6 +578,14 @@ async def create_chat(
         raise HTTPException(status_code=500, detail="Planner failed to produce a plan")
     return thisRun.plan
 
+@chat_router.get("/{query_id}/stream")
+async def stream_chat(
+    workspace_name: str,
+    query_id: str,
+    request: Request,
+    current_user: SessionContainer = Depends(verify_session())
+):
+    return sse_stream(bus, f"query:{query_id}", request)
 
 @chat_router.get("/get_docs_by_name")
 async def get_docs_by_name(
@@ -531,4 +606,3 @@ async def get_reports_by_name(
     with SessionLocal() as db:
         report_ids = db_utils.get_reportID_by_name(db, workspace_name, report_name)
     return report_ids
-

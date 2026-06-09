@@ -15,6 +15,12 @@ class TaskSpec(BaseModel):
     status: Literal["pending", "dispatched", "completed", "failed"] = "pending"
     notes: str = ""
     error: str = ""
+    human_in_the_loop: bool = Field(
+        default=False,
+        description="This specifies whether to ask the user back after the sub agent has done its job or not. This is to be set by the planner agent" \
+        "If this is True then after the sub agent run user will be prompted for their feedback or is useful if the user wants to change anything." \
+        "This can also be used to ask user for a permission for a specific thing."
+        )
 
 class InternalDocAgentDeps(BaseModel):
     doc_answering_mode: Literal["ASK", "REPORT"] | None = Field(default=None, description="ASK=focused Q&A, REPORT=multi-section narrative report")
@@ -49,3 +55,6 @@ class QueryRun(BaseModel): # the name should be changed to QueryRun in the upcom
     status: Literal["running", "completed", "failed"]
     query_counter: int = 1
 
+class ChatAcceptedResponse(BaseModel):
+    query_id: UUID
+    stream_url: str
