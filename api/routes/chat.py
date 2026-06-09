@@ -43,6 +43,9 @@ chat_router = APIRouter()
 # sidesteps a wedged session rather than re-poking it. This catches transient
 # failures (a one-off hang, a flaky page) without spending a replan.
 MAX_DISPATCH_ATTEMPTS = 3
+USER_FEEDBACK_TIMEOUT_SECONDS = 300
+
+_pending_input: dict[str, asyncio.Future] = {}
 
 def make_workspace(workspace_path):
     os.makedirs(workspace_path)
@@ -168,6 +171,7 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput:
             deps=PlannerDeps(workspace_name=run.workspace_id)
         )
         await sink.publish("Planner has planned", {})
+        run.planner_messages = planner_run.all_messages()
         return planner_run.output
 
     current_todo = render_todo(run)
@@ -329,23 +333,34 @@ async def delete_workspace(
 
     return workspace_name
 
-@chat_router.post("/user_chat", response_model=ChatAcceptedResponse)
+@chat_router.post("/user_chat", response_model=ChatAcceptedResponse | dict[str, str])
 async def user_chat(
     workspace_name: str,
-    query: str,
+    query: str | None = None,
+    query_id: str | None = None,
+    answer: str | None = None,
     session: SessionContainer = Depends(verify_session())
 ):
-    query_id = uuid4()
-    asyncio.create_task(
-        execute_chat(
-            workspace_name=workspace_name,
-            query=query,
-            query_id=query_id,
-            user_id=session.get_user_id()
+    if query_id is not None and answer is not None:
+        fut = _pending_input.get(query_id)
+        if fut is None or fut.done():
+            raise HTTPException(409, detail="no pending question for this query")
+        fut.set_result(answer)
+        return {"status": "ok"}
+    elif query_id is None and answer is None and query is not None:
+        query_id = uuid4()
+        asyncio.create_task(
+            execute_chat(
+                workspace_name=workspace_name,
+                query=query,
+                query_id=query_id,
+                user_id=session.get_user_id()
+            )
         )
-    )
-    stream_url = f"/chat/{query_id}/stream"
-    return ChatAcceptedResponse(query_id=query_id, stream_url=stream_url)
+        stream_url = f"/chat/{query_id}/stream"
+        return ChatAcceptedResponse(query_id=query_id, stream_url=stream_url)
+    else:
+        raise HTTPException(status_code=400, detail="Either the query_id or answer is missing otherwise query param is missing.")
 
 async def execute_chat(
     workspace_name: str,
@@ -431,6 +446,32 @@ async def create_chat(
     start_workers(n=2)
     try:
         thisRun.plan = await planner(thisRun, sink)
+
+        while thisRun.plan.needs_user_feedback:
+
+            await sink.publish("awaiting_user_input", {"query_id": str(query_id), "question": thisRun.plan.feedback_question})
+            future = asyncio.get_event_loop().create_future()
+            _pending_input[str(query_id)] = future
+            try:
+                answer = await asyncio.wait_for(future, timeout=USER_FEEDBACK_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                await sink.publish(
+                    "user_input_timeout",
+                    {"query_id": str(query_id), "question": thisRun.plan.feedback_question},
+                )
+                break
+            finally:
+                _pending_input.pop(str(query_id), None)
+
+            planner_run = await plannerAgent.run(
+                user_prompt=answer,
+                message_history=thisRun.planner_messages,
+                deps=PlannerDeps(workspace_name=thisRun.workspace_id)
+            )
+            thisRun.plan = planner_run.output
+            thisRun.planner_messages = planner_run.all_messages()
+            thisRun.planner_messages = planner_run.all_messages()
+            _pending_input.pop(str(query_id), None) if thisRun.plan.needs_user_feedback else None
 
         # Per-run filesystem subdir under the chat's workspace folder. Sub-agents'
         # _resolve_inside guard keeps them confined to THIS subdir, so cross-run
@@ -580,11 +621,12 @@ async def create_chat(
 
 @chat_router.get("/{query_id}/stream")
 async def stream_chat(
-    workspace_name: str,
     query_id: str,
     request: Request,
     current_user: SessionContainer = Depends(verify_session())
 ):
+    # The stream is keyed solely on the query_id (path param). No workspace_name
+    # needed — dropping it lets the URL the client receives work as-is.
     return sse_stream(bus, f"query:{query_id}", request)
 
 @chat_router.get("/get_docs_by_name")

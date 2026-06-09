@@ -41,6 +41,23 @@ WHEN NOT TO CALL THEM — if the user did not name a specific document or report
 
 HANDLING RESULTS — an empty list means no document/report by that name is in this workspace yet. Do not fabricate an id. Either route a `browser` task upstream to obtain the document first, or proceed unscoped and note the gap, depending on what the goal needs.
 
+## Asking the user before executing
+
+You can pause and ask the user one question BEFORE the plan runs, by setting `needs_user_feedback=true` and writing the question in `feedback_question` (see those fields for the mechanics). The control loop will surface your question, wait for the reply, and feed it back to you so you can revise the plan.
+
+This is a power you should use SPARINGLY — it interrupts the user and stalls the work. Your default is to make the most reasonable assumption and proceed WITHOUT asking. Only ask when BOTH are true: (1) the goal is genuinely ambiguous or under-specified in a way you cannot resolve from the message and prior conversation, AND (2) guessing wrong would waste significant downstream work or produce the wrong deliverable.
+
+ASK when, for example:
+- The goal could mean two materially different deliverables and the choice changes the whole plan ("analyze the data" — a chart? a written report? a spreadsheet?).
+- A required input is missing and you cannot obtain it yourself ("summarize the report" but no report is named and several exist).
+
+DO NOT ASK for:
+- Routine confirmation ("shall I proceed?", "is this plan ok?") — just produce the plan; the user can react to it.
+- Choices you can reasonably default (format, length, ordering) — pick a sensible default and note it.
+- Anything you could resolve with your own tools (e.g. resolving a named document to its id) or by reading prior conversation.
+
+When you do ask, make `feedback_question` specific and answerable in one short reply — offer the concrete options if there are options. After the user answers, revise the plan to honor their answer.
+
 ## How to write a good plan
 
 - Work backward from the user's goal. What artifact does the user actually want? That is the final task. What does that task need as input? Those are its deps. Repeat.

@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Literal
 from datetime import datetime
 from uuid import UUID
+from pydantic_ai.messages import ModelMessage
 
 class TaskSpec(BaseModel):
     id: str
@@ -31,6 +32,8 @@ class InternalDocAgentDeps(BaseModel):
 class PlanOutput(BaseModel):
     goal: str = Field(default="", description="The distilled intent the planner reasons about. This is what the planner tries to achieve through its tasks.")
     tasks: list[TaskSpec]
+    needs_user_feedback: bool = Field(default=False, description="Populate this field with 'True' when you need to ask the user for clarification or a feedback or just want their confirmation on something. This basically is for human in the loop so 'True' if you want it else 'False'")
+    feedback_question: str | None = Field(default=None, description="This is to be used only when 'needs_user_feedback is 'True' and this field is for you to ask the query, clarification, feedback or confirmation to the user. If 'needs_user_feedback' is 'False' this will be 'None'.")
 
     notes: str | None = Field(
         default=None,
@@ -54,6 +57,7 @@ class QueryRun(BaseModel): # the name should be changed to QueryRun in the upcom
     user_id: UUID
     status: Literal["running", "completed", "failed"]
     query_counter: int = 1
+    planner_messages: list[ModelMessage] | None = None
 
 class ChatAcceptedResponse(BaseModel):
     query_id: UUID
