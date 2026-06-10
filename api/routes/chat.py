@@ -1,5 +1,4 @@
 import os
-import uuid
 from pathlib import Path
 from orchestrator import plannerAgent, PlannerDeps
 from browser_agent import BrowserExecutor, ExecutorResult
@@ -351,45 +350,6 @@ def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bo
     return True, "All produced files exist and are non-empty"
 
 #---------------------------------I am below a function---------------------------------
-
-@chat_router.post("/create_workspace")
-async def register__workspace(workspace_name: str, session: SessionContainer = Depends(verify_session())) -> str:
-    with SessionLocal() as db:
-        db_utils.create_workspace(
-            db,
-            workspace_id=workspace_name,
-            user_id=session.get_user_id()
-        )
-    make_workspace(f"{Path.cwd()}/file_system_root/{workspace_name}")
-    return workspace_name
-
-@chat_router.delete("/delete_workspace")
-async def delete_workspace(
-    workspace_name: str, session: SessionContainer = Depends(verify_session())
-) -> str:
-    """Delete a workspace and everything scoped to it — its QueryRuns and other
-    workspace-scoped rows in the DB, plus its directory tree on disk.
-
-    DB first, filesystem best-effort: the DB delete is the source of truth and
-    commits in one transaction. If the rmtree afterwards fails (e.g. a
-    permission error), it's logged and the request still succeeds — a leftover
-    directory with no DB rows pointing at it is harmless.
-    """
-    user_id = session.get_user_id()
-    with SessionLocal() as db:
-        deleted = db_utils.delete_workspace(
-            db, workspace_id=workspace_name, user_id=user_id
-        )
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Best-effort filesystem cleanup. ignore_errors swallows a missing dir (the
-    # workspace may have had no runs yet) and partial-permission failures; the
-    # DB is already authoritative at this point.
-    workspace_path = Path(f"{Path.cwd()}/file_system_root/{workspace_name}")
-    shutil.rmtree(workspace_path, ignore_errors=True)
-
-    return workspace_name
 
 @chat_router.post("/user_chat", response_model=ChatAcceptedResponse | dict[str, str])
 async def user_chat(

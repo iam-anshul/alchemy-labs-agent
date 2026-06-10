@@ -334,3 +334,34 @@ def get_reportID_by_name(db: Session, workspace_id: str, report_name:str):
     ).all()
     return [id[0] for id in report_ids]
 
+def get_all_workspaces(db: Session, user_id: str) -> list[str]:
+    return list(
+        db.scalars(
+            select(Workspace.workspace_id)
+            .where(Workspace.user_id == user_id)
+        )
+    )
+
+def get_workspace_ingested_files(
+    db: Session,
+    workspace_id: str,
+    user_id: str
+):
+    rows = db.execute(
+        select(
+            Doc.doc_id,
+            Doc.title,
+            Doc.doc_summary
+        ).where(
+            Doc.workspace_id == workspace_id,
+            Doc.uploaded_by_user_id == user_id
+        )
+    ).all()
+
+    return {
+        row.doc_id: {
+            "doc_title": row.title,
+            "doc_summary": row.doc_summary
+        }
+        for row in rows
+    }

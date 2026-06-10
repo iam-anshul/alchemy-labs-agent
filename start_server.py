@@ -10,6 +10,7 @@ from supertokens_python.framework.fastapi import get_middleware
 from supertokens_python.recipe import session, emailpassword
 
 from api.routes.chat import chat_router
+from api.routes.workspace import workspace_router
 from api.routes.documents import document_router
 from api import ingest
 
@@ -133,6 +134,12 @@ server.add_middleware(
 )
 
 server.include_router(root_router)
+
+server.include_router(
+    workspace_router,
+    prefix="/workspace",
+    tags=["workspace"]
+)
 
 server.include_router(
     chat_router,
