@@ -6,6 +6,7 @@ from supertokens_python.recipe.session.framework.fastapi import verify_session
 from supertokens_python.recipe.session import SessionContainer
 import shutil
 from pathlib import Path
+from api.response_models import FileInfo
 
 workspace_router = APIRouter()
 
@@ -53,7 +54,7 @@ async def list_workspace(session: SessionContainer = Depends(verify_session())) 
     with SessionLocal() as db:
         return db_utils.get_all_workspaces(db, session.get_user_id())
 
-@workspace_router.post("/list_files", response_model=dict[str, dict[str, str | None]])
+@workspace_router.post("/list_files", response_model=dict[str, FileInfo])
 async def list(
     workspace_id: str,
     session: SessionContainer = Depends(verify_session())
