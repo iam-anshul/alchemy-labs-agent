@@ -5,6 +5,7 @@ from browser_agent import BrowserExecutor, ExecutorResult
 from agent_schemas import QueryAnswer
 from report_schemas import ReportResult
 from office_agent import run_office_executor
+from web_agent import run_web_executor
 from api.ingest import start_workers, shutdown_workers
 from db import SessionLocal
 from db import utils as db_utils
@@ -331,7 +332,33 @@ async def dispatch_executor_agent(
                     produced=[str(Path(doc_draft_result.output_path).relative_to(subdir_path))],
                     notes=doc_draft_result.brief
                 )
-
+        case "web_search":
+            await task_sink.publish_ui(
+                "agent_started",
+                stage="web_search",
+                status="started",
+                message="Web search agent started",
+                data={"expects": task_spec.expects, "dep_files": dep_files},
+            )
+            web_result = await run_web_executor(
+                workspace_subdir_path=subdir_path,
+                query=task_spec.query,
+                expects=task_spec.expects,
+                dep_files=dep_files,
+                sink=task_sink,
+            )
+            await task_sink.publish_ui(
+                "agent_ended",
+                stage="done",
+                status="failed" if web_result.error else "completed",
+                message="Web search agent finished" if not web_result.error else "Web search agent failed",
+                data={
+                    "produced": web_result.produced,
+                    "notes": web_result.notes,
+                    "error": web_result.error,
+                },
+            )
+            return web_result
 def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bool, str]:
     """Verify each produced path exists under the workspace and is non-empty.
 

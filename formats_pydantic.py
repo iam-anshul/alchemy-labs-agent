@@ -4,10 +4,16 @@ from datetime import datetime
 from uuid import UUID
 from pydantic_ai.messages import ModelMessage
 
+class InternalDocAgentDeps(BaseModel):
+    doc_answering_mode: Literal["ASK", "REPORT"] | None = Field(default=None, description="ASK=focused Q&A, REPORT=multi-section narrative report")
+    doc_ids: list[str] | None = Field(default=None, description="RESOLVED doc_ids (NOT filenames). When the user names specific documents, call the fetch_doc_ids tool to resolve each name to its doc_id and put the returned ids here. Leave None for a general question over all documents in the workspace. Never put a raw filename or title here.")
+    report_id: str | None = Field(default=None, description="RESOLVED report_id (NOT a report name). Only for doc_answering_mode='REPORT' when the user refers to an existing report by name: call the fetch_report_ids tool to resolve the name to its report_id and put it here. None to draft a fresh report.")
+    target_length: Literal["brief", "standard", "deep"] | None = Field(default="standard", description="This is the target length of the report, if the user mentions anything that can be specified to the length of the report, use these field accordingly to it. This shold be filled only when doc_answering mode is 'REPORT' else set this 'None', if the doc_answering mode is 'REPORT' and the user has't specified any length keep the length 'standard'.")
+
 class TaskSpec(BaseModel):
     id: str
     title: str
-    agent: Literal["browser", "office", "document_answering"]
+    agent: Literal["browser", "office", "document_answering", "web_search"]
     doc_deps: InternalDocAgentDeps | None = Field(default=None, description="only when agent agent type is document_answering else this needs to be None")
     deps: list[str] = Field(default_factory=list) # refrences by id
     query: str
@@ -24,12 +30,6 @@ class TaskSpec(BaseModel):
         )
     query_for_human_in_the_loop: str | None = Field(default=None, description="This field is to be populated by planner if human_in_the_loop field is" \
     "'True' then planner needs to populate this field prompting the user to ask the feedback or confirmation or validation query the planner wants to ask.")
-
-class InternalDocAgentDeps(BaseModel):
-    doc_answering_mode: Literal["ASK", "REPORT"] | None = Field(default=None, description="ASK=focused Q&A, REPORT=multi-section narrative report")
-    doc_ids: list[str] | None = Field(default=None, description="RESOLVED doc_ids (NOT filenames). When the user names specific documents, call the fetch_doc_ids tool to resolve each name to its doc_id and put the returned ids here. Leave None for a general question over all documents in the workspace. Never put a raw filename or title here.")
-    report_id: str | None = Field(default=None, description="RESOLVED report_id (NOT a report name). Only for doc_answering_mode='REPORT' when the user refers to an existing report by name: call the fetch_report_ids tool to resolve the name to its report_id and put it here. None to draft a fresh report.")
-    target_length: Literal["brief", "standard", "deep"] | None = Field(default="standard", description="This is the target length of the report, if the user mentions anything that can be specified to the length of the report, use these field accordingly to it. This shold be filled only when doc_answering mode is 'REPORT' else set this 'None', if the doc_answering mode is 'REPORT' and the user has't specified any length keep the length 'standard'.")
 
 class PlanOutput(BaseModel):
     goal: str = Field(default="", description="The distilled intent the planner reasons about. This is what the planner tries to achieve through its tasks.")
