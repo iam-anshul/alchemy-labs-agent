@@ -7,10 +7,19 @@ from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 from typing import Any
+import asyncio
+import base64
 import json
+import mimetypes
 from pydantic import BaseModel
 from openai import AsyncOpenAI, APIConnectionError, RateLimitError
+from api.events import EventSink, file_artifact
 from orchestrator import OPENAI_BASE_URL, OPENAI_KEY
+
+try:
+    from browser_use.browser.events import ScreenshotEvent
+except Exception:  # pragma: no cover - depends on browser-use version
+    ScreenshotEvent = None
 
 
 @dataclass
@@ -223,11 +232,30 @@ class BrowserExecutor:
         query: str,
         expects: str,
         dep_files: list[str],  # relative to workspace
+        sink: EventSink = EventSink(),
+        task_id: str | None = None,
+        attempt: int | None = None,
     ) -> ExecutorResult:
         self._submitted = None
+        sink = sink.child(task_id=task_id, agent_type="browser", attempt=attempt)
 
         task_prompt = self._build_task_prompt(query, expects, dep_files)
-        tools = self._build_tools()
+        tools = self._build_tools(sink=sink)
+        before_outputs = self._snapshot_outputs()
+        await sink.publish_ui(
+            "agent_started",
+            stage="browsing",
+            status="started",
+            message="Browser agent started",
+            data={
+                "query": query,
+                "expects": expects,
+                "dep_files": dep_files,
+                "headless": self.headless,
+                "max_steps": self.max_steps,
+                "max_failures": self.max_failures,
+            },
+        )
         browser = Browser(
             headless=self.headless,
             downloads_path=str(self.workspace / "outputs"),
@@ -257,14 +285,26 @@ class BrowserExecutor:
             # max_steps is a run() arg in browser-use, NOT a constructor arg.
             # Passing it to Agent(...) is silently ignored and run() falls back
             # to its default of 500. Pass it here so the cap is actually enforced.
-            history = await browser_agent.run(max_steps=self.max_steps)
+            history = await browser_agent.run(
+                max_steps=self.max_steps,
+                on_step_start=self._make_step_hook(sink, "started"),
+                on_step_end=self._make_step_hook(sink, "progress"),
+            )
         except Exception as e:
+            await sink.publish_ui(
+                "agent_ended",
+                stage="browsing",
+                status="failed",
+                message="Browser agent failed",
+                data={"error_class": type(e).__name__, "error": str(e)},
+            )
             return ExecutorResult(
                 produced=[],
                 notes="",
                 error=f"Agent loop failed: {type(e).__name__}: {e}",
             )
         finally:
+            await self._emit_new_outputs(sink, before_outputs)
             await browser.kill()
 
         if self._submitted is None:
@@ -272,12 +312,169 @@ class BrowserExecutor:
             # calling our submit tool. Surface its OWN final result and errors so
             # the planner can see WHY it failed and reroute on replan, instead of
             # a generic "no submit" string.
-            return ExecutorResult(
+            result = ExecutorResult(
                 produced=[],
                 notes="",
                 error=self._failure_detail(history),
             )
+            await sink.publish_ui(
+                "agent_ended",
+                stage="browsing",
+                status="failed",
+                message="Browser agent ended without submitting",
+                data={"error": result.error},
+            )
+            return result
+        await sink.publish_ui(
+            "agent_ended",
+            stage="browsing",
+            status="completed",
+            message="Browser agent completed",
+            data={"produced": self._submitted.produced, "notes": self._submitted.notes},
+        )
         return self._submitted
+
+    def _snapshot_outputs(self) -> set[str]:
+        outputs = self.workspace / "outputs"
+        if not outputs.exists():
+            return set()
+        return {
+            str(p.relative_to(self.workspace))
+            for p in outputs.rglob("*")
+            if p.is_file()
+        }
+
+    async def _emit_new_outputs(self, sink: EventSink, before: set[str]) -> None:
+        outputs = self.workspace / "outputs"
+        if not outputs.exists():
+            return
+        for p in outputs.rglob("*"):
+            if not p.is_file():
+                continue
+            rel = str(p.relative_to(self.workspace))
+            if rel in before:
+                continue
+            mime, _ = mimetypes.guess_type(str(p))
+            await sink.publish_ui(
+                "artifact_ready",
+                stage="download",
+                status="progress",
+                message=f"Browser saved {p.name}",
+                artifacts=[
+                    file_artifact(
+                        kind="file",
+                        path=rel,
+                        filename=p.name,
+                        type=p.suffix.lstrip(".").lower() or None,
+                        mime_type=mime,
+                        bytes=p.stat().st_size,
+                    )
+                ],
+            )
+
+    def _make_step_hook(self, sink: EventSink, status: str):
+        async def hook(agent: Agent) -> None:
+            step = self._history_len(agent)
+            data: dict[str, Any] = {"step": step}
+            try:
+                data["url"] = await agent.browser_session.get_current_page_url()
+            except Exception:
+                try:
+                    page = await agent.browser_session.get_current_page()
+                    data["url"] = getattr(page, "url", None)
+                except Exception:
+                    pass
+            try:
+                data["title"] = await agent.browser_session.get_current_page_title()
+            except Exception:
+                try:
+                    page = await agent.browser_session.get_current_page()
+                    title = page.title()
+                    data["title"] = await title if hasattr(title, "__await__") else title
+                except Exception:
+                    pass
+            await sink.publish_ui(
+                "agent_progress",
+                stage="browsing",
+                status="progress",
+                message="Browser is working",
+                data=data,
+            )
+            if status == "progress":
+                screenshot = await self._capture_screenshot(agent, step, data)
+                if screenshot is not None:
+                    await sink.publish_ui(
+                        "artifact_ready",
+                        stage="screenshot",
+                        status="progress",
+                        message="Browser screenshot captured",
+                        artifacts=[screenshot],
+                    )
+
+        return hook
+
+    @staticmethod
+    def _history_len(agent: Agent) -> int:
+        try:
+            return len(agent.history.urls())
+        except Exception:
+            return 0
+
+    async def _capture_screenshot(
+        self,
+        agent: Agent,
+        step: int,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        try:
+            result = await agent.browser_session.take_screenshot(full_page=False)
+        except Exception:
+            if ScreenshotEvent is None:
+                return None
+            try:
+                event = agent.browser_session.event_bus.dispatch(ScreenshotEvent(full_page=False))
+                await event
+                result = await event.event_result(raise_if_any=True, raise_if_none=True)
+            except Exception:
+                return None
+
+        encoded = self._extract_screenshot_base64(result)
+        if not encoded:
+            return None
+
+        rel_path = f"outputs/browser_events/step_{step:04d}.png"
+        path = self.workspace / rel_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(base64.b64decode(encoded))
+            size = path.stat().st_size
+        except Exception:
+            size = None
+
+        return file_artifact(
+            kind="screenshot",
+            path=rel_path,
+            filename=f"step_{step:04d}.png",
+            type="png",
+            mime_type="image/png",
+            bytes=size,
+            content_base64=encoded,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _extract_screenshot_base64(result: Any) -> str | None:
+        if isinstance(result, bytes):
+            return base64.b64encode(result).decode("ascii")
+        if isinstance(result, str):
+            return result.removeprefix("data:image/png;base64,")
+        for attr in ("screenshot", "base64", "content_base64", "data"):
+            value = getattr(result, attr, None)
+            if isinstance(value, bytes):
+                return base64.b64encode(value).decode("ascii")
+            if isinstance(value, str):
+                return value.removeprefix("data:image/png;base64,")
+        return None
 
     @staticmethod
     def _failure_detail(history) -> str:
@@ -353,9 +550,23 @@ Call the submit tool with:
 Do not call submit until you have written all expected files.
 """
 
-    def _build_tools(self) -> Tools:
+    def _build_tools(self, sink: EventSink = EventSink()) -> Tools:
         tools = Tools()
         workspace = self.workspace
+
+        def emit_artifact(stage: str, message: str, artifact: dict[str, Any]) -> None:
+            try:
+                asyncio.create_task(
+                    sink.publish_ui(
+                        "artifact_ready",
+                        stage=stage,
+                        status="progress",
+                        message=message,
+                        artifacts=[artifact],
+                    )
+                )
+            except RuntimeError:
+                pass
 
         @tools.action(
             description=(
@@ -369,7 +580,8 @@ Do not call submit until you have written all expected files.
             if not absolute_path.exists():
                 return f"ERROR: file {path} does not exist"
             try:
-                return absolute_path.read_text(encoding="utf-8")
+                content = absolute_path.read_text(encoding="utf-8")
+                return content
             except UnicodeDecodeError:
                 return f"ERROR: file {path} is not text; use a different tool"
 
@@ -386,6 +598,20 @@ Do not call submit until you have written all expected files.
                 return f"ERROR: path {path} is outside workspace"
             absolute_path.parent.mkdir(parents=True, exist_ok=True)
             absolute_path.write_text(content, encoding="utf-8")
+            rel = str(absolute_path.relative_to(workspace))
+            emit_artifact(
+                "writing_file",
+                f"Browser wrote {Path(path).name}",
+                file_artifact(
+                    kind="markdown" if absolute_path.suffix.lower() == ".md" else "file",
+                    path=rel,
+                    filename=absolute_path.name,
+                    type=absolute_path.suffix.lstrip(".").lower() or None,
+                    mime_type=mimetypes.guess_type(str(absolute_path))[0],
+                    bytes=absolute_path.stat().st_size,
+                    content=content if absolute_path.suffix.lower() in {".md", ".txt", ".csv", ".json"} else None,
+                ),
+            )
             return f"Wrote {absolute_path.stat().st_size} bytes to {path}"
 
         @tools.action(

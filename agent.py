@@ -23,6 +23,7 @@ configured in `.env`.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import re
@@ -52,7 +53,7 @@ from agent_schemas import (
     TableFinding,
     TableTarget,
 )
-from api.events import EventSink
+from api.events import EventSink, file_artifact
 from config import get_settings
 from db import SessionLocal, utils
 from db.models import Doc, ExtractedTable, Node, Page
@@ -884,7 +885,23 @@ async def _maybe_save_answer(
         f"- {c.doc_title}, pages {c.pages}" for c in citations
     )
     out_path.write_text(header + body + sources, encoding="utf-8")
-    await sink.publish("file_saved", {"path": str(out_path)})
+    await sink.publish_ui(
+        "artifact_ready",
+        stage="writing_file",
+        status="progress",
+        message="Saved grounded answer",
+        artifacts=[
+            file_artifact(
+                kind="markdown",
+                path=str(out_path),
+                filename=out_path.name,
+                type="md",
+                mime_type="text/markdown",
+                bytes=out_path.stat().st_size,
+                content=out_path.read_text(encoding="utf-8"),
+            )
+        ],
+    )
     return str(out_path)
 
 
@@ -913,13 +930,20 @@ async def answer_query(
         log.info("answer_query: %d candidate doc(s), query=%r", len(candidates), query)
 
         query_id = sink.query_id or f"q_{uuid.uuid4().hex[:12]}"
-        await sink.publish("query_started", {
-            "query_id": query_id,
-            "query": query,
-            "workspace_id": workspace_id,
-            "user_id": user_id,
-            "n_candidate_docs": len(candidates),
-        })
+        sink.query_id = query_id
+        sink.workspace_id = sink.workspace_id or workspace_id
+        sink.agent_type = sink.agent_type or "document_answering"
+        await sink.publish_ui(
+            "agent_started",
+            stage="document_query",
+            status="started",
+            message="Searching documents",
+            data={
+                "query": query,
+                "user_id": user_id,
+                "n_candidate_docs": len(candidates),
+            },
+        )
 
         # 2. Frontier state
         pending: deque[str] = deque([query])
@@ -951,12 +975,24 @@ async def answer_query(
             log.info("=" * 60)
             log.info(">>> HOP %d  question=%r", hop_n, question)
             log.info("=" * 60)
-            await sink.publish("hop_started", {"hop": hop_n, "question": question})
+            await sink.publish_ui(
+                "agent_progress",
+                stage="document_hop",
+                status="progress",
+                message="Investigating document question",
+                data={"hop": hop_n, "question": question},
+            )
 
             # 3a. Router
             stage = "router"
             log.info(">>> ROUTER  (request_limit=%d)", s.agent_router_request_limit)
-            await sink.publish("router_started", {"hop": hop_n})
+            await sink.publish_ui(
+                "agent_progress",
+                stage="routing",
+                status="progress",
+                message="Finding relevant document sections",
+                data={"hop": hop_n},
+            )
             t_r = time.monotonic()
             router_prompt = _build_router_prompt(
                 question=question,
@@ -972,11 +1008,26 @@ async def answer_query(
             )).output
             log.info("<<< router done in %.1fs — %d page_target(s), %d table_target(s)",
                      time.monotonic() - t_r, len(routed.page_targets), len(routed.table_targets))
-            await sink.publish("router_done", {
-                "page_targets": [p.model_dump() for p in routed.page_targets],
-                "table_targets": [t.model_dump() for t in routed.table_targets],
-                "reasoning": routed.reasoning,
-            })
+            await sink.publish_ui(
+                "agent_progress",
+                stage="routing",
+                status="progress",
+                message="Found relevant document sections",
+                data={
+                    "hop": hop_n,
+                    "page_target_count": len(routed.page_targets),
+                    "table_target_count": len(routed.table_targets),
+                    "targets": [
+                        {
+                            "doc_id": p.doc_id,
+                            "pages": f"{p.start_page}-{p.end_page}",
+                            "reason": p.reason,
+                        }
+                        for p in routed.page_targets[:5]
+                    ],
+                    "reasoning": routed.reasoning,
+                },
+            )
             _expand_table_targets_with_pages(routed)
             new_pages, new_tables = _new_targets(routed, already_picked_pages, already_picked_tables)
             log.info("    new this hop: %d page_target(s), %d table_target(s)",
@@ -998,11 +1049,29 @@ async def answer_query(
             # 3b. Excel on NEW tables only
             if new_tables:
                 stage = "excel"
-                await sink.publish("excel_started", {"n_tables": len(new_tables)})
+                await sink.publish_ui(
+                    "agent_progress",
+                    stage="excel",
+                    status="progress",
+                    message="Analyzing extracted tables",
+                    data={"n_tables": len(new_tables)},
+                )
                 new_findings = await _run_excel_on(new_tables, question=question)
-                await sink.publish("excel_done", {
-                    "findings": [f.model_dump() for f in new_findings],
-                })
+                await sink.publish_ui(
+                    "artifact_ready",
+                    stage="excel",
+                    status="progress",
+                    message="Table findings are ready",
+                    artifacts=[
+                        file_artifact(
+                            kind="extracted_content",
+                            type="json",
+                            mime_type="application/json",
+                            content=json.dumps([f.model_dump() for f in new_findings], default=str),
+                            metadata={"n_tables": len(new_tables)},
+                        )
+                    ],
+                )
             else:
                 new_findings = []
             acc_findings.extend(new_findings)
@@ -1024,18 +1093,38 @@ async def answer_query(
             stage = "answer"
             log.info(">>> ANSWER  (context=%d chars, findings=%d)",
                      len(context_md), len(acc_findings))
-            await sink.publish("answer_started", {"hop": hop_n})
+            await sink.publish_ui(
+                "agent_progress",
+                stage="answering",
+                status="progress",
+                message="Drafting grounded answer",
+                data={"hop": hop_n},
+            )
             t_a = time.monotonic()
             answer_limits = UsageLimits(request_limit=s.agent_answer_request_limit)
             ans = (await answer_agent.run(answer_prompt, usage_limits=answer_limits)).output
             log.info("<<< answer done in %.1fs — confidence=%s  needs_more=%s  follow_ups=%d",
                      time.monotonic() - t_a, ans.confidence, ans.needs_more, len(ans.follow_up_questions))
-            await sink.publish("answer_done", {
-                "answer": ans.answer,
-                "confidence": ans.confidence,
-                "needs_more": ans.needs_more,
-                "follow_up_questions": ans.follow_up_questions,
-            })
+            await sink.publish_ui(
+                "artifact_ready",
+                stage="answering",
+                status="progress",
+                message="Grounded answer draft is ready",
+                data={
+                    "confidence": ans.confidence,
+                    "needs_more": ans.needs_more,
+                    "follow_up_questions": ans.follow_up_questions,
+                },
+                artifacts=[
+                    file_artifact(
+                        kind="final_answer",
+                        type="md",
+                        mime_type="text/markdown",
+                        content=ans.answer,
+                        metadata={"confidence": ans.confidence, "hop": hop_n},
+                    )
+                ],
+            )
             for fq in ans.follow_up_questions:
                 log.info("    follow_up: %s", fq)
 
@@ -1116,15 +1205,29 @@ async def answer_query(
         _save_query(workspace_id, user_id, query, result, doc_ids_used, table_ids_used)
         log.info("answer_query done — hops=%d  confidence=%s  latency=%d ms",
                  result.n_hops, result.confidence, result.latency_ms)
-        await sink.publish("complete", result.model_dump())
+        await sink.publish_ui(
+            "agent_ended",
+            stage="done",
+            status="completed",
+            message="Document answer complete",
+            data={
+                "query_id": result.query_id,
+                "confidence": result.confidence,
+                "n_hops": result.n_hops,
+                "citation_count": len(result.citations),
+                "output_path": result.output_path,
+            },
+        )
         return result
 
     except Exception as e:
-        await sink.publish("error", {
-            "stage": stage,
-            "error_class": type(e).__name__,
-            "message": str(e),
-        })
+        await sink.publish_ui(
+            "agent_ended",
+            stage=stage,
+            status="failed",
+            message="Document answer failed",
+            data={"error_class": type(e).__name__, "error": str(e)},
+        )
         raise
 
 

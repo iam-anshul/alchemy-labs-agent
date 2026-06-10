@@ -28,4 +28,3 @@ python-multipart>=0.0.20
 browser-use
 playwright
 supertokens-python==0.28.1
-uvicorn==0.32.0

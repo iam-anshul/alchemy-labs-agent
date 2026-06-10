@@ -66,7 +66,14 @@ async def _run_query(
     doc_ids: list[str] | None,
 ) -> None:
     channel_id = f"query:{query_id}"
-    sink = EventSink(bus=bus, channel_id=channel_id, query_id=query_id)
+    sink = EventSink(
+        bus=bus,
+        channel_id=channel_id,
+        query_id=query_id,
+        workspace_id=ws_id,
+        run_id=query_id,
+        agent_type="document_answering",
+    )
     try:
         await answer_query(ws_id, user_id, query, doc_ids, sink=sink)
     finally:

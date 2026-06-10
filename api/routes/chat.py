@@ -26,7 +26,7 @@ from fastapi import Depends, APIRouter, HTTPException, Request
 from supertokens_python.recipe.session.framework.fastapi import verify_session
 from supertokens_python.recipe.session import SessionContainer
 
-from api.events import EventSink, bus
+from api.events import EventSink, bus, file_artifact
 
 from dotenv import load_dotenv
 import os
@@ -158,7 +158,13 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput:
     """
 
     if not run.plan:
-        await sink.publish("Planner is planning", {})
+        await sink.child(agent_type="planner").publish_ui(
+            "agent_started",
+            stage="planning",
+            status="started",
+            message="Planning the work",
+            data={"phase": "initial"},
+        )
         message_history: list[ModelMessage] = []
         if run.query_counter > 1:
             message_history = _build_message_history_from_prior_runs(
@@ -170,7 +176,6 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput:
             message_history=message_history or None,
             deps=PlannerDeps(workspace_name=run.workspace_id)
         )
-        await sink.publish("Planner has planned", {})
         run.planner_messages = planner_run.all_messages()
         return planner_run.output
 
@@ -199,9 +204,49 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput:
         "warrant a change, return the revised plan. Otherwise return the "
         "plan unchanged."
     )
-    await sink.publish("Checking if planner needs to replan", {})
+    await sink.child(agent_type="planner").publish_ui(
+        "agent_started",
+        stage="replanning",
+        status="started",
+        message="Checking whether the plan needs updates",
+        data={"phase": "replan", "replans_used": run.replans_used, "replan_budget": run.replan_budget},
+    )
     planner_run = await plannerAgent.run(user_prompt=replan_prompt, deps=PlannerDeps(workspace_name=run.workspace_id))
     return planner_run.output
+
+async def publish_todo_artifact(run: QueryRun, sink: EventSink, *, phase: str) -> None:
+    todo_path = Path(run.workspace) / "todo.md"
+    content = todo_path.read_text(encoding="utf-8") if todo_path.exists() else render_todo(run)
+    artifact = file_artifact(
+        kind="markdown",
+        path="todo.md",
+        filename="todo.md",
+        type="md",
+        mime_type="text/markdown",
+        bytes=todo_path.stat().st_size if todo_path.exists() else len(content.encode("utf-8")),
+        content=content,
+        metadata={"phase": phase},
+    )
+    planner_sink = sink.child(agent_type="planner")
+    await planner_sink.publish_ui(
+        "artifact_ready",
+        stage=phase,
+        status="progress",
+        message="Plan file is ready",
+        artifacts=[artifact],
+    )
+    await planner_sink.publish_ui(
+        "agent_ended",
+        stage=phase,
+        status="completed",
+        message="Planning complete",
+        data={
+            "phase": phase,
+            "n_tasks": len(run.plan.tasks) if run.plan else 0,
+            "needs_user_feedback": bool(run.plan and run.plan.needs_user_feedback),
+        },
+        artifacts=[artifact],
+    )
     
 async def dispatch_executor_agent(
     task_spec: TaskSpec,
@@ -210,9 +255,10 @@ async def dispatch_executor_agent(
     workspace_id: str,
     user_id: UUID,
     query_id: str,
-    sink: EventSink
-) -> str:
-    await sink.publish(f"{task_spec.agent} agent is running", {})
+    sink: EventSink,
+    attempt: int | None = None,
+) -> ExecutorResult:
+    task_sink = sink.child(task_id=task_spec.id, agent_type=task_spec.agent, attempt=attempt)
     # Planner should have the tools to list document and find the doc id with its name
     match task_spec.agent:
         case "browser":
@@ -220,60 +266,72 @@ async def dispatch_executor_agent(
             browser_result = await browser.run(
                 query=task_spec.query,
                 expects=task_spec.expects,
-                dep_files=dep_files
+                dep_files=dep_files,
+                sink=task_sink,
+                task_id=task_spec.id,
+                attempt=attempt,
             )
-            await sink.publish(f"{task_spec.agent} agent has returned the response", {})
             return browser_result
         case "office":
+            await task_sink.publish_ui(
+                "agent_started",
+                stage="office",
+                status="started",
+                message="Office agent started",
+                data={"expects": task_spec.expects, "dep_files": dep_files},
+            )
             office_result = await run_office_executor(
                 workspace=subdir_path,
                 query=task_spec.query,
                 expects=task_spec.expects,
-                dep_files=dep_files
+                dep_files=dep_files,
+                sink=task_sink,
                 )
-            await sink.publish(f"{task_spec.agent} agent has returned the response", {})
+            await task_sink.publish_ui(
+                "agent_ended",
+                stage="done",
+                status="failed" if office_result.error else "completed",
+                message="Office agent finished" if not office_result.error else "Office agent failed",
+                data={
+                    "produced": office_result.produced,
+                    "notes": office_result.notes,
+                    "error": office_result.error,
+                },
+            )
             return office_result
         case "document_answering":
-            channel_id = f"query:{query_id}"
-            this_sink = EventSink(bus=bus, channel_id=channel_id, query_id=query_id)
-            try:
-                if task_spec.doc_deps.doc_answering_mode == "ASK":
-                    await sink.publish("Searching in the document", {})
+            this_sink = task_sink.child(agent_type="document_answering")
+            if task_spec.doc_deps.doc_answering_mode == "ASK":
 
-                    doc_ask_result = await answer_query(
-                        workspace_subdir_path=subdir_path,
-                        workspace_id=workspace_id,
-                        user_id=user_id,
-                        query=task_spec.query,
-                        doc_ids=task_spec.doc_deps.doc_ids,
-                        sink=this_sink
-                    )
-                    await sink.publish(f"{task_spec.agent} agent has returned the response", {})
-                    return ExecutorResult(
-                        produced=[str(Path(doc_ask_result.output_path).relative_to(subdir_path))],
-                        notes=f"Page targets: {doc_ask_result.page_targets} with confidence: {doc_ask_result.confidence} \n citations: {doc_ask_result.citations}"
-                    )
-                    
-                elif task_spec.doc_deps.doc_answering_mode == "REPORT":
-                    await sink.publish("Drafting report", {})
+                doc_ask_result = await answer_query(
+                    workspace_subdir_path=subdir_path,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    query=task_spec.query,
+                    doc_ids=task_spec.doc_deps.doc_ids,
+                    sink=this_sink
+                )
+                return ExecutorResult(
+                    produced=[str(Path(doc_ask_result.output_path).relative_to(subdir_path))],
+                    notes=f"Page targets: {doc_ask_result.page_targets} with confidence: {doc_ask_result.confidence} \n citations: {doc_ask_result.citations}"
+                )
+                
+            elif task_spec.doc_deps.doc_answering_mode == "REPORT":
 
-                    doc_draft_result = await draft_report(
-                        workspace_subdir_path=subdir_path,
-                        workspace_id=workspace_id,
-                        user_id=str(user_id),
-                        brief=task_spec.query,
-                        doc_ids=task_spec.doc_deps.doc_ids,
-                        target_length=task_spec.doc_deps.target_length,
-                        report_id=task_spec.doc_deps.report_id,
-                        sink=this_sink # "Compare ESG strategies..."
-                    )
-                    await sink.publish(f"{task_spec.agent} agent has returned the response", {})
-                    return ExecutorResult(
-                        produced=[str(Path(doc_draft_result.output_path).relative_to(subdir_path))],
-                        notes=doc_draft_result.brief
-                    )
-            finally:
-                bus.close(channel_id)
+                doc_draft_result = await draft_report(
+                    workspace_subdir_path=subdir_path,
+                    workspace_id=workspace_id,
+                    user_id=str(user_id),
+                    brief=task_spec.query,
+                    doc_ids=task_spec.doc_deps.doc_ids,
+                    target_length=task_spec.doc_deps.target_length,
+                    report_id=task_spec.doc_deps.report_id,
+                    sink=this_sink # "Compare ESG strategies..."
+                )
+                return ExecutorResult(
+                    produced=[str(Path(doc_draft_result.output_path).relative_to(subdir_path))],
+                    notes=doc_draft_result.brief
+                )
 
 def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bool, str]:
     """Verify each produced path exists under the workspace and is non-empty.
@@ -346,6 +404,15 @@ async def user_chat(
         if fut is None or fut.done():
             raise HTTPException(409, detail="no pending question for this query")
         fut.set_result(answer)
+        channel_id = f"query:{query_id}"
+        sink = EventSink(bus=bus, channel_id=channel_id, query_id=query_id, run_id=query_id)
+        await sink.publish_ui(
+            "agent_progress",
+            agent_type="system",
+            stage="user_input",
+            status="progress",
+            message="User input received",
+        )
         return {"status": "ok"}
     elif query_id is None and answer is None and query is not None:
         query_id = uuid4()
@@ -369,7 +436,14 @@ async def execute_chat(
     user_id
 ):
     channel_id = f"query:{query_id}"
-    sink = EventSink(bus=bus, channel_id=channel_id)
+    sink = EventSink(
+        bus=bus,
+        channel_id=channel_id,
+        query_id=str(query_id),
+        workspace_id=workspace_name,
+        run_id=str(query_id),
+        agent_type="system",
+    )
     try:
         await create_chat(
                 workspace_name=workspace_name,
@@ -391,13 +465,12 @@ async def create_chat(
     sink: EventSink = EventSink()
 ):
 
-    await sink.publish(
-        "chat_started",
-        {
-            "query_id": query_id,
-            "query": query,
-            "workspace_id": workspace_name
-        }
+    await sink.publish_ui(
+        "run_started",
+        stage="chat",
+        status="started",
+        message="Chat run started",
+        data={"query": query},
     )
 
     #Check if the workspace exists or not, check in local filesystem and in the database as well.
@@ -459,20 +532,29 @@ async def create_chat(
         thisRun.workspace = absolute_workspace_path_with_subdir
         make_workspace(Path(absolute_workspace_path_with_subdir))
         # write todo
-        await sink.publish("writing todo.md", {})
         write_todo_atomic(thisRun)
+        await publish_todo_artifact(thisRun, sink, phase="planning")
 
         while thisRun.plan.needs_user_feedback:
 
-            await sink.publish("awaiting_user_input", {"query_id": str(query_id), "question": thisRun.plan.feedback_question})
+            await sink.child(agent_type="planner").publish_ui(
+                "awaiting_user_input",
+                stage="planning",
+                status="waiting",
+                message="Waiting for your input",
+                data={"question": thisRun.plan.feedback_question, "scope": "planner"},
+            )
             future = asyncio.get_event_loop().create_future()
             _pending_input[str(query_id)] = future
             try:
                 answer = await asyncio.wait_for(future, timeout=USER_FEEDBACK_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                await sink.publish(
-                    "user_input_timeout",
-                    {"query_id": str(query_id), "question": thisRun.plan.feedback_question},
+                await sink.child(agent_type="planner").publish_ui(
+                    "agent_progress",
+                    stage="planning",
+                    status="failed",
+                    message="User input timed out",
+                    data={"question": thisRun.plan.feedback_question, "scope": "planner"},
                 )
                 break
             finally:
@@ -486,8 +568,8 @@ async def create_chat(
             thisRun.plan = planner_run.output
             thisRun.planner_messages = planner_run.all_messages()
 
-            await sink.publish("writing todo.md", {})
             write_todo_atomic(thisRun)
+            await publish_todo_artifact(thisRun, sink, phase="planning")
 
         # let's fore the tasks ony by one and not concurrently.
         while True:
@@ -538,41 +620,74 @@ async def create_chat(
                         workspace_id=workspace_name,
                         user_id=user_id,
                         query_id=str(query_id),
-                        sink=sink
+                        sink=sink,
+                        attempt=attempt,
                     )
                     if not result.error:
-                        await sink.publish(f"Agent: {task.agent} completed its task: {task.id} successfully", {"Agent":task.agent, "task":task.id})
                         break
                     print(f"[{task.id}] attempt {attempt}/{MAX_DISPATCH_ATTEMPTS} failed: {result.error}")
                     if attempt < MAX_DISPATCH_ATTEMPTS:
-                        await sink.publish(f"Agent {task.agent} has failed its task: {task.id}, re-attempting task", {"agent":task.agent, "attempt":attempt, "error":task.error})
+                        await sink.child(task_id=task.id, agent_type=task.agent, attempt=attempt).publish_ui(
+                            "agent_progress",
+                            stage="retrying",
+                            status="progress",
+                            message="Retrying task",
+                            data={"error": result.error, "max_attempts": MAX_DISPATCH_ATTEMPTS},
+                        )
                         await asyncio.sleep(2 * attempt)  # linear backoff: 2s, 4s
 
                 human_answer: str | None = None
                 if result.error:
-                    await sink.publish(f"Maximum attemps reached for task {task.id}, task failed", {"error":task.error})
+                    await sink.child(task_id=task.id, agent_type=task.agent).publish_ui(
+                        "agent_ended",
+                        stage="done",
+                        status="failed",
+                        message="Task failed",
+                        data={"error": result.error},
+                    )
                     task.status = "failed"
                     task.error = f"after {MAX_DISPATCH_ATTEMPTS} attempts: {result.error}"
                 else:
                     # files were written by the executor's write_file tool during
                     # its run; we only verify they exist and are non-empty.
-                    await sink.publish("Validating agent's produced file", {"agent":task.agent})
+                    await sink.child(task_id=task.id, agent_type="system").publish_ui(
+                        "agent_progress",
+                        stage="validating",
+                        status="progress",
+                        message="Validating produced files",
+                        data={"agent_type": task.agent, "produced": result.produced},
+                    )
                     ok, status = validate_files_exist(absolute_workspace_path_with_subdir, result.produced)
                     if not ok:
-                        await sink.publish(f"Validation failed for agent's produced file", {"agent":{task.agent}, "error":status})
+                        await sink.child(task_id=task.id, agent_type="system").publish_ui(
+                            "agent_ended",
+                            stage="validating",
+                            status="failed",
+                            message="Produced file validation failed",
+                            data={"agent_type": task.agent, "error": status},
+                        )
                         raise HTTPException(status_code=500, detail=f"file validation for 'produced' of the task failed with status: {status}")
 
                     if task.human_in_the_loop and task.query_for_human_in_the_loop:
-                        await sink.publish("awaiting_user_input for task", {"agent": task.agent, "query_id": str(query_id), "question": task.query_for_human_in_the_loop})
+                        await sink.child(task_id=task.id, agent_type=task.agent).publish_ui(
+                            "awaiting_user_input",
+                            stage="task",
+                            status="waiting",
+                            message="Waiting for your input",
+                            data={"question": task.query_for_human_in_the_loop, "scope": "task"},
+                        )
 
                         future = asyncio.get_event_loop().create_future()
                         _pending_input[str(query_id)] = future
                         try:
                             human_answer = await asyncio.wait_for(future, timeout=USER_FEEDBACK_TIMEOUT_SECONDS)
                         except asyncio.TimeoutError:
-                            await sink.publish(
-                                "user_input_timeout",
-                                {"query_id": str(query_id), "question": task.query_for_human_in_the_loop},
+                            await sink.child(task_id=task.id, agent_type=task.agent).publish_ui(
+                                "agent_progress",
+                                stage="task",
+                                status="failed",
+                                message="User input timed out",
+                                data={"question": task.query_for_human_in_the_loop, "scope": "task"},
                             )
                         finally:
                             _pending_input.pop(str(query_id), None)
@@ -583,7 +698,12 @@ async def create_chat(
                                 + "\n\nUser feedback on this task's result: "
                                 + human_answer
                             )
-                            await sink.publish("Re-running task with user feedback", {"agent": task.agent, "task": task.id})
+                            await sink.child(task_id=task.id, agent_type=task.agent).publish_ui(
+                                "agent_progress",
+                                stage="task",
+                                status="progress",
+                                message="Re-running task with your feedback",
+                            )
                             result = await dispatch_executor_agent(
                                 task,
                                 dep_files,
@@ -592,15 +712,28 @@ async def create_chat(
                                 user_id=user_id,
                                 query_id=str(query_id),
                                 sink=sink,
+                                attempt=1,
                             )
                             if result.error:
-                                await sink.publish(f"Re-run failed for task {task.id}", {"error": result.error})
+                                await sink.child(task_id=task.id, agent_type=task.agent).publish_ui(
+                                    "agent_ended",
+                                    stage="done",
+                                    status="failed",
+                                    message="Task re-run failed",
+                                    data={"error": result.error},
+                                )
                                 task.status = "failed"
                                 task.error = f"re-run after user feedback failed: {result.error}"
                                 continue
                             ok, status = validate_files_exist(absolute_workspace_path_with_subdir, result.produced)
                             if not ok:
-                                await sink.publish(f"Validation failed for re-run produced file", {"agent": task.agent, "error": status})
+                                await sink.child(task_id=task.id, agent_type="system").publish_ui(
+                                    "agent_ended",
+                                    stage="validating",
+                                    status="failed",
+                                    message="Re-run file validation failed",
+                                    data={"agent_type": task.agent, "error": status},
+                                )
                                 raise HTTPException(status_code=500, detail=f"file validation for 're-run produced' of the task failed with status: {status}")
 
                     task.status = "completed"
@@ -621,8 +754,8 @@ async def create_chat(
                         thisRun.replans_used += 1
 
                 # always rewrite todo.md so status, produced, and any replan land on disk
-                await sink.publish("Writing final todo.md", {})
                 write_todo_atomic(thisRun)
+                await publish_todo_artifact(thisRun, sink, phase="replanning" if thisRun.replans_used else "planning")
     finally:
 
         # Increment query_counter by 1
@@ -647,10 +780,28 @@ async def create_chat(
                 # runs see a clear signal that the previous turn didn't finish
                 # what it set out to do.
                 final_status = "failed"
+        thisRun.status = final_status
         with SessionLocal() as db:
             e = db_utils.register_query_run(db, run=thisRun, final_todo=final_todo)
             if e is not None:
                 raise HTTPException(status_code=500, detail=f"Could not write query run to the database error: {e}")
+        await sink.publish_ui(
+            "run_ended",
+            stage="done",
+            status="completed" if final_status == "completed" else "failed",
+            message="Chat run complete" if final_status == "completed" else "Chat run failed",
+            data={"status": final_status},
+            artifacts=[
+                file_artifact(
+                    kind="markdown",
+                    path="todo.md",
+                    filename="todo.md",
+                    type="md",
+                    mime_type="text/markdown",
+                    content=final_todo,
+                )
+            ] if final_todo else [],
+        )
 
         # Drain any ingest queued during the run (a doc agent may have kicked
         # off a slow LlamaParse + tree build right before submit) and cancel

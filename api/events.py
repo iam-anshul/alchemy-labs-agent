@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 
 _SENTINEL = object()
 
@@ -82,12 +83,93 @@ class EventSink:
     bus: EventBus | None = field(default=None, repr=False)
     channel_id: str = ""
     query_id: str | None = None
+    workspace_id: str | None = None
+    run_id: str | None = None
+    task_id: str | None = None
+    agent_type: str | None = None
+    attempt: int | None = None
 
     async def publish(self, event_type: str, payload: dict) -> None:
         if self.bus is None or not self.channel_id:
             return
         channel = self.bus.get_or_create(self.channel_id)
         await channel.publish(event_type, payload)
+
+    async def publish_ui(
+        self,
+        event_type: str,
+        *,
+        agent_type: str | None = None,
+        stage: str,
+        status: str,
+        message: str,
+        task_id: str | None = None,
+        attempt: int | None = None,
+        data: dict[str, Any] | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        payload = {
+            "query_id": self.query_id,
+            "workspace_id": self.workspace_id,
+            "run_id": self.run_id or self.query_id,
+            "task_id": self.task_id if task_id is None else task_id,
+            "agent_type": agent_type or self.agent_type or "system",
+            "stage": stage,
+            "status": status,
+            "message": message,
+            "attempt": self.attempt if attempt is None else attempt,
+            "timestamp": time.time(),
+            "data": data or {},
+            "artifacts": artifacts or [],
+        }
+        await self.publish(event_type, payload)
+
+    def child(
+        self,
+        *,
+        task_id: str | None = None,
+        agent_type: str | None = None,
+        attempt: int | None = None,
+    ) -> "EventSink":
+        return EventSink(
+            bus=self.bus,
+            channel_id=self.channel_id,
+            query_id=self.query_id,
+            workspace_id=self.workspace_id,
+            run_id=self.run_id,
+            task_id=self.task_id if task_id is None else task_id,
+            agent_type=self.agent_type if agent_type is None else agent_type,
+            attempt=self.attempt if attempt is None else attempt,
+        )
+
+
+def file_artifact(
+    *,
+    path: str | None = None,
+    filename: str | None = None,
+    kind: str = "file",
+    type: str | None = None,
+    mime_type: str | None = None,
+    bytes: int | None = None,
+    content: str | None = None,
+    content_base64: str | None = None,
+    url: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if filename is None and path:
+        filename = path.rsplit("/", 1)[-1]
+    return {
+        "kind": kind,
+        "path": path,
+        "filename": filename,
+        "type": type,
+        "mime_type": mime_type,
+        "bytes": bytes,
+        "content": content,
+        "content_base64": content_base64,
+        "url": url,
+        "metadata": metadata or {},
+    }
 
 
 bus = EventBus()

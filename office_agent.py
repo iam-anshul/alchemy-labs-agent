@@ -2,9 +2,12 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+import asyncio
+import mimetypes
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from api.events import EventSink, file_artifact
 from dotenv import load_dotenv
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
@@ -36,6 +39,7 @@ class OfficeDeps:
     tool call.
     """
     workspace: Path
+    sink: EventSink = field(default_factory=EventSink)
     submitted: ExecutorResult | None = None
 
 
@@ -88,6 +92,29 @@ def write_file(ctx: RunContext[OfficeDeps], path: str, content: str) -> str:
         return resolved
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(content, encoding="utf-8")
+    try:
+        rel = str(resolved.relative_to(ctx.deps.workspace))
+        asyncio.create_task(
+            ctx.deps.sink.publish_ui(
+                "artifact_ready",
+                stage="writing_file",
+                status="progress",
+                message=f"Office agent wrote {resolved.name}",
+                artifacts=[
+                    file_artifact(
+                        kind="markdown" if resolved.suffix.lower() == ".md" else "file",
+                        path=rel,
+                        filename=resolved.name,
+                        type=resolved.suffix.lstrip(".").lower() or None,
+                        mime_type=mimetypes.guess_type(str(resolved))[0],
+                        bytes=resolved.stat().st_size,
+                        content=content if resolved.suffix.lower() in {".md", ".txt", ".csv", ".json"} else None,
+                    )
+                ],
+            )
+        )
+    except RuntimeError:
+        pass
     return f"Wrote {resolved.stat().st_size} bytes to {path}"
 
 
@@ -215,12 +242,13 @@ async def run_office_executor(
     query: str,
     expects: str,
     dep_files: list[str],
+    sink: EventSink = EventSink(),
 ) -> ExecutorResult:
     """Pattern-B entrypoint: build per-run deps, run the module-level agent,
     return the result captured by the submit tool.
 
     Plugs into dispatch_executor_agent in main.py for the 'office' branch."""
-    deps = OfficeDeps(workspace=workspace.resolve())
+    deps = OfficeDeps(workspace=workspace.resolve(), sink=sink.child(agent_type="office"))
     task_prompt = _build_task_prompt(query, expects, dep_files)
 
     try:

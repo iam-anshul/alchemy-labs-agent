@@ -28,6 +28,8 @@ def sse_stream(bus: EventBus, channel_id: str, request: Request) -> EventSourceR
         async for event in channel.subscribe():
             if await request.is_disconnected():
                 break
-            yield {"event": event.type, "data": json.dumps(event.payload, default=str)}
+            payload = dict(event.payload)
+            payload.setdefault("timestamp", event.ts)
+            yield {"event": event.type, "data": json.dumps(payload, default=str)}
 
     return EventSourceResponse(_generate())

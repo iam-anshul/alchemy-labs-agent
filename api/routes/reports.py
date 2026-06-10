@@ -75,7 +75,14 @@ async def _run_report(
     target_length: Literal["brief", "standard", "deep"],
 ) -> None:
     channel_id = f"report:{report_id}"
-    sink = EventSink(bus=bus, channel_id=channel_id)
+    sink = EventSink(
+        bus=bus,
+        channel_id=channel_id,
+        query_id=report_id,
+        workspace_id=ws_id,
+        run_id=report_id,
+        agent_type="document_answering",
+    )
     try:
         await draft_report(
             workspace_id=ws_id,

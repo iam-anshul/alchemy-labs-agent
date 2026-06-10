@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -24,7 +25,7 @@ from agent import (
     _safe_filename,
 )
 from agent_schemas import Citation, PageTarget, RouterResult, TableFinding, TableTarget
-from api.events import EventSink
+from api.events import EventSink, file_artifact
 from config import get_settings
 from db import SessionLocal, utils
 from db.models import Doc, ExtractedTable, Node
@@ -333,7 +334,12 @@ async def _write_executive_summary(
     sink: EventSink,
 ) -> str:
     """Generate the final Executive Summary from the actual drafted body."""
-    await sink.publish("summary_started", {})
+    await sink.publish_ui(
+        "agent_progress",
+        stage="summary",
+        status="progress",
+        message="Writing executive summary",
+    )
     body_md = "\n\n".join(
         f"## {d.title}\n\n{_strip_leading_title(d.markdown, d.title)}"
         for d in sections
@@ -344,7 +350,13 @@ async def _write_executive_summary(
         f"Finished report body:\n\n{body_md[:30000]}"
     )
     out = (await _build_summary_agent().run(prompt)).output
-    await sink.publish("summary_done", {"n_words": _count_words(out.summary)})
+    await sink.publish_ui(
+        "agent_progress",
+        stage="summary",
+        status="progress",
+        message="Executive summary complete",
+        data={"n_words": _count_words(out.summary)},
+    )
     return out.summary.strip()
 
 
@@ -389,7 +401,13 @@ async def _run_retrieval(
     payload: dict = {"hop": hop}
     if gap:
         payload["gap"] = gap
-    await sink.publish("retrieval_started", payload)
+    await sink.publish_ui(
+        "agent_progress",
+        stage="retrieval",
+        status="progress",
+        message="Finding supporting document sections",
+        data=payload,
+    )
 
     with SessionLocal() as db:
         stmt = select(Doc).where(Doc.workspace_id == workspace_id)
@@ -413,11 +431,17 @@ async def _run_retrieval(
 
     page_refs = _resolve_page_refs(routed.page_targets)
     table_refs = _resolve_table_refs(routed.table_targets)
-    await sink.publish("retrieval_done", {
-        "hop": hop,
-        "n_page_refs": len(page_refs),
-        "n_table_refs": len(table_refs),
-    })
+    await sink.publish_ui(
+        "agent_progress",
+        stage="retrieval",
+        status="progress",
+        message="Retrieved report evidence",
+        data={
+            "hop": hop,
+            "n_page_refs": len(page_refs),
+            "n_table_refs": len(table_refs),
+        },
+    )
     return page_refs, table_refs, routed.page_targets, routed.table_targets
 
 
@@ -477,7 +501,12 @@ async def _make_outline(
     table_refs: list[TableRef],
     sink: EventSink,
 ) -> ReportOutline:
-    await sink.publish("outline_started", {})
+    await sink.publish_ui(
+        "agent_progress",
+        stage="outline",
+        status="progress",
+        message="Building report outline",
+    )
     page_lines = [
         f"- {_page_ref_key(p.doc_id, p.start_page, p.end_page)}: {p.leaf_summary[:300]}"
         for p in page_refs
@@ -493,7 +522,21 @@ async def _make_outline(
     )
     agent = _build_outline_agent()
     outline = (await agent.run(prompt)).output
-    await sink.publish("outline_done", {"outline": outline.model_dump()})
+    await sink.publish_ui(
+        "artifact_ready",
+        stage="outline",
+        status="progress",
+        message="Report outline is ready",
+        artifacts=[
+            file_artifact(
+                kind="extracted_content",
+                type="json",
+                mime_type="application/json",
+                content=json.dumps(outline.model_dump(), default=str),
+                metadata={"n_sections": len(outline.sections)},
+            )
+        ],
+    )
     return outline
 
 
@@ -504,10 +547,13 @@ async def _write_one_section(
     table_findings: list[TableFinding],
     sink: EventSink,
 ) -> SectionDraft:
-    await sink.publish("section_started", {
-        "section_id": section.section_id,
-        "title": section.title,
-    })
+    await sink.publish_ui(
+        "agent_progress",
+        stage="section_drafting",
+        status="progress",
+        message=f"Drafting section: {section.title}",
+        data={"section_id": section.section_id, "title": section.title},
+    )
     pages_md = _render_section_pages(section, page_refs)
     findings_md = _render_section_findings(section, table_findings)
     prompt = (
@@ -521,11 +567,18 @@ async def _write_one_section(
     draft.section_id = section.section_id
     draft.title = section.title
     draft.n_words = _count_words(draft.markdown)
-    await sink.publish("section_done", {
-        "section_id": section.section_id,
-        "n_words": draft.n_words,
-        "n_citations": len(draft.citations),
-    })
+    await sink.publish_ui(
+        "agent_progress",
+        stage="section_drafting",
+        status="progress",
+        message=f"Drafted section: {section.title}",
+        data={
+            "section_id": section.section_id,
+            "title": section.title,
+            "n_words": draft.n_words,
+            "n_citations": len(draft.citations),
+        },
+    )
     return draft
 
 
@@ -553,18 +606,30 @@ async def _critique(
     sink: EventSink,
     hop: int,
 ) -> CritiqueResult:
-    await sink.publish("critic_started", {"hop": hop})
+    await sink.publish_ui(
+        "agent_progress",
+        stage="critique",
+        status="progress",
+        message="Reviewing report draft",
+        data={"hop": hop},
+    )
     agent = _build_critic_agent()
     prompt = (
         f"Brief: {brief}\n\nOutline title: {outline.title}\n\n"
         f"Draft markdown:\n{draft_md[:12000]}"
     )
     critique = (await agent.run(prompt)).output
-    await sink.publish("critic_done", {
-        "hop": hop,
-        "gaps": [g.model_dump() for g in critique.gaps],
-        "notes": critique.notes,
-    })
+    await sink.publish_ui(
+        "agent_progress",
+        stage="critique",
+        status="progress",
+        message="Report critique complete",
+        data={
+            "hop": hop,
+            "gap_count": len(critique.gaps),
+            "notes": critique.notes,
+        },
+    )
     return critique
 
 
@@ -736,12 +801,19 @@ async def draft_report(
             report_name=_safe_filename(f"{report_id}.md")
         )
 
-    await sink.publish("report_started", {
-        "report_id": report_id,
-        "brief": brief,
-        "workspace_id": workspace_id,
-        "target_length": target_length,
-    })
+    sink.workspace_id = sink.workspace_id or workspace_id
+    sink.agent_type = sink.agent_type or "document_answering"
+    await sink.publish_ui(
+        "agent_started",
+        stage="report",
+        status="started",
+        message="Drafting report",
+        data={
+            "report_id": report_id,
+            "brief": brief,
+            "target_length": target_length,
+        },
+    )
 
     try:
         page_refs, table_refs, table_findings = await _broad_retrieval(
@@ -752,7 +824,23 @@ async def draft_report(
             brief, outline, page_refs, table_findings, sink,
         )
         draft_md = _stitch_draft(outline, section_drafts)
-        await sink.publish("draft_assembled", {"n_words": _count_words(draft_md)})
+        await sink.publish_ui(
+            "artifact_ready",
+            stage="draft",
+            status="progress",
+            message="Draft report assembled",
+            data={"n_words": _count_words(draft_md)},
+            artifacts=[
+                file_artifact(
+                    kind="markdown",
+                    filename="draft_preview.md",
+                    type="md",
+                    mime_type="text/markdown",
+                    content=draft_md,
+                    metadata={"n_words": _count_words(draft_md)},
+                )
+            ],
+        )
 
         n_hops = 0
         for hop in range(s.report_max_hops):
@@ -775,7 +863,23 @@ async def draft_report(
                 hop=hop,
             )
             draft_md = _stitch_draft(outline, section_drafts)
-            await sink.publish("draft_assembled", {"n_words": _count_words(draft_md)})
+            await sink.publish_ui(
+                "artifact_ready",
+                stage="draft",
+                status="progress",
+                message="Updated draft report assembled",
+                data={"n_words": _count_words(draft_md), "hop": hop},
+                artifacts=[
+                    file_artifact(
+                        kind="markdown",
+                        filename="draft_preview.md",
+                        type="md",
+                        mime_type="text/markdown",
+                        content=draft_md,
+                        metadata={"n_words": _count_words(draft_md), "hop": hop},
+                    )
+                ],
+            )
 
         # Refresh the Executive Summary from the actual drafted body
         # (the outline's `abstract` was written before sections existed).
@@ -784,7 +888,24 @@ async def draft_report(
         draft_md = _stitch_draft(outline, section_drafts, summary=final_summary)
 
         output_path = _save_report_to_disk(report_id, workspace_subdir_path, draft_md)
-        await sink.publish("saved", {"path": output_path})
+        output = Path(output_path)
+        await sink.publish_ui(
+            "artifact_ready",
+            stage="writing_file",
+            status="progress",
+            message="Report saved",
+            artifacts=[
+                file_artifact(
+                    kind="markdown",
+                    path=output_path,
+                    filename=output.name,
+                    type="md",
+                    mime_type="text/markdown",
+                    bytes=output.stat().st_size,
+                    content=draft_md,
+                )
+            ],
+        )
 
         result = ReportResult(
             report_id=report_id,
@@ -806,14 +927,29 @@ async def draft_report(
             report_id=report_id,
             result=result,
         )
-        await sink.publish("complete", result.model_dump())
+        await sink.publish_ui(
+            "agent_ended",
+            stage="done",
+            status="completed",
+            message="Report complete",
+            data={
+                "report_id": result.report_id,
+                "n_sections": result.n_sections,
+                "n_words": result.n_words,
+                "n_hops": result.n_hops,
+                "output_path": result.output_path,
+            },
+        )
         return result
 
     except Exception as e:
         with SessionLocal() as db:
             utils.update_report(db, report_id, status="error")
-        await sink.publish("error", {
-            "error_class": type(e).__name__,
-            "message": str(e),
-        })
+        await sink.publish_ui(
+            "agent_ended",
+            stage="report",
+            status="failed",
+            message="Report failed",
+            data={"error_class": type(e).__name__, "error": str(e)},
+        )
         raise
