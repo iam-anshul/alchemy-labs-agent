@@ -22,6 +22,8 @@ class TaskSpec(BaseModel):
         "If this is True then after the sub agent run user will be prompted for their feedback or is useful if the user wants to change anything." \
         "This can also be used to ask user for a permission for a specific thing."
         )
+    query_for_human_in_the_loop: str | None = Field(default=None, description="This field is to be populated by planner if human_in_the_loop field is" \
+    "'True' then planner needs to populate this field prompting the user to ask the feedback or confirmation or validation query the planner wants to ask.")
 
 class InternalDocAgentDeps(BaseModel):
     doc_answering_mode: Literal["ASK", "REPORT"] | None = Field(default=None, description="ASK=focused Q&A, REPORT=multi-section narrative report")

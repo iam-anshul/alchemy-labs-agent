@@ -447,6 +447,21 @@ async def create_chat(
     try:
         thisRun.plan = await planner(thisRun, sink)
 
+        # Per-run filesystem subdir under the chat's workspace folder. Sub-agents'
+        # _resolve_inside guard keeps them confined to THIS subdir, so cross-run
+        # contamination is impossible — but the DB layer captures the chat identity
+        # so the planner still sees prior runs via message_history.
+        # Naming works like this------>
+        # 1. we need to create this worksapce subdir after the first planner run, reason being we can use goal field of todo.md from planner as its name.
+        # 2. we need to have a query counter maintainer in db, all the names of the chat run will be prefixed with this counter value, so the naming scheme will look something like this: f"{query_counter}_{plan.goal}""
+        workspace_sub_dir = f"{thisRun.query_counter}_{str(thisRun.query_id)}" # define query counter in db
+        absolute_workspace_path_with_subdir = f"{absolute_workspace_path}/{workspace_sub_dir}"
+        thisRun.workspace = absolute_workspace_path_with_subdir
+        make_workspace(Path(absolute_workspace_path_with_subdir))
+        # write todo
+        await sink.publish("writing todo.md", {})
+        write_todo_atomic(thisRun)
+
         while thisRun.plan.needs_user_feedback:
 
             await sink.publish("awaiting_user_input", {"query_id": str(query_id), "question": thisRun.plan.feedback_question})
@@ -470,23 +485,10 @@ async def create_chat(
             )
             thisRun.plan = planner_run.output
             thisRun.planner_messages = planner_run.all_messages()
-            thisRun.planner_messages = planner_run.all_messages()
-            _pending_input.pop(str(query_id), None) if thisRun.plan.needs_user_feedback else None
 
-        # Per-run filesystem subdir under the chat's workspace folder. Sub-agents'
-        # _resolve_inside guard keeps them confined to THIS subdir, so cross-run
-        # contamination is impossible — but the DB layer captures the chat identity
-        # so the planner still sees prior runs via message_history.
-        # Naming works like this------>
-        # 1. we need to create this worksapce subdir after the first planner run, reason being we can use goal field of todo.md from planner as its name.
-        # 2. we need to have a query counter maintainer in db, all the names of the chat run will be prefixed with this counter value, so the naming scheme will look something like this: f"{query_counter}_{plan.goal}""
-        workspace_sub_dir = f"{thisRun.query_counter}_{str(thisRun.query_id)}" # define query counter in db
-        absolute_workspace_path_with_subdir = f"{absolute_workspace_path}/{workspace_sub_dir}"
-        thisRun.workspace = absolute_workspace_path_with_subdir
-        make_workspace(Path(absolute_workspace_path_with_subdir))
-        # write todo
-        await sink.publish("writing todo.md", {})
-        write_todo_atomic(thisRun)
+            await sink.publish("writing todo.md", {})
+            write_todo_atomic(thisRun)
+
         # let's fore the tasks ony by one and not concurrently.
         while True:
             if all(task.status == "completed" for task in thisRun.plan.tasks):
@@ -546,6 +548,7 @@ async def create_chat(
                         await sink.publish(f"Agent {task.agent} has failed its task: {task.id}, re-attempting task", {"agent":task.agent, "attempt":attempt, "error":task.error})
                         await asyncio.sleep(2 * attempt)  # linear backoff: 2s, 4s
 
+                human_answer: str | None = None
                 if result.error:
                     await sink.publish(f"Maximum attemps reached for task {task.id}, task failed", {"error":task.error})
                     task.status = "failed"
@@ -558,9 +561,53 @@ async def create_chat(
                     if not ok:
                         await sink.publish(f"Validation failed for agent's produced file", {"agent":{task.agent}, "error":status})
                         raise HTTPException(status_code=500, detail=f"file validation for 'produced' of the task failed with status: {status}")
+
+                    if task.human_in_the_loop and task.query_for_human_in_the_loop:
+                        await sink.publish("awaiting_user_input for task", {"agent": task.agent, "query_id": str(query_id), "question": task.query_for_human_in_the_loop})
+
+                        future = asyncio.get_event_loop().create_future()
+                        _pending_input[str(query_id)] = future
+                        try:
+                            human_answer = await asyncio.wait_for(future, timeout=USER_FEEDBACK_TIMEOUT_SECONDS)
+                        except asyncio.TimeoutError:
+                            await sink.publish(
+                                "user_input_timeout",
+                                {"query_id": str(query_id), "question": task.query_for_human_in_the_loop},
+                            )
+                        finally:
+                            _pending_input.pop(str(query_id), None)
+
+                        if human_answer is not None:
+                            task.query = (
+                                task.query
+                                + "\n\nUser feedback on this task's result: "
+                                + human_answer
+                            )
+                            await sink.publish("Re-running task with user feedback", {"agent": task.agent, "task": task.id})
+                            result = await dispatch_executor_agent(
+                                task,
+                                dep_files,
+                                Path(absolute_workspace_path_with_subdir),
+                                workspace_id=workspace_name,
+                                user_id=user_id,
+                                query_id=str(query_id),
+                                sink=sink,
+                            )
+                            if result.error:
+                                await sink.publish(f"Re-run failed for task {task.id}", {"error": result.error})
+                                task.status = "failed"
+                                task.error = f"re-run after user feedback failed: {result.error}"
+                                continue
+                            ok, status = validate_files_exist(absolute_workspace_path_with_subdir, result.produced)
+                            if not ok:
+                                await sink.publish(f"Validation failed for re-run produced file", {"agent": task.agent, "error": status})
+                                raise HTTPException(status_code=500, detail=f"file validation for 're-run produced' of the task failed with status: {status}")
+
                     task.status = "completed"
                     task.produced = result.produced
                     task.notes = result.notes
+
+                # We can add write_todo_atomic here so that user can see the changes as well, this can be done in future versions
 
                 # ask the planner whether the plan needs revision, but only while
                 # we still have replan budget
