@@ -1,9 +1,0 @@
-{
-	"env": {
-		"commonjs": {
-			"presets": [
-				"@babel/env"
-			]
-		}
-	}
-}
