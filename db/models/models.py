@@ -20,6 +20,7 @@ class Doc(Base):
     uploaded_by_user_id: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
     source_path: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
     n_pages: Mapped[int | None] = mapped_column(Integer)
     n_tables: Mapped[int | None] = mapped_column(Integer)
     doc_summary: Mapped[str | None] = mapped_column(Text)

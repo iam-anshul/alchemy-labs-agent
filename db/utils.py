@@ -327,6 +327,21 @@ def get_docID_by_name(db: Session, workspace_id: str, doc_name:str):
     ).all()
     return [id[0] for id in doc_ids]
 
+def get_ready_docID_by_hash(db: Session, workspace_id: str, content_hash: str) -> str | None:
+    """Return the doc_id of a fully-ingested ('ready') doc in this workspace
+    whose original file bytes match content_hash, or None. Workspace-scoped
+    (NOT subdir/path-scoped) so a doc ingested in an earlier chat run of the
+    same workspace is reused instead of re-ingested. Matching on the sha256 of
+    the bytes (not the filename) means same-name-different-content PDFs are
+    treated as distinct, and same-content-different-name PDFs are deduped.
+    Picks the most recently created match if several exist."""
+    row = db.query(Doc.doc_id).filter(
+        Doc.workspace_id == workspace_id,
+        Doc.content_hash == content_hash,
+        Doc.status == "ready",
+    ).order_by(Doc.created_at.desc()).first()
+    return row[0] if row else None
+
 def get_reportID_by_name(db: Session, workspace_id: str, report_name:str):
     report_ids = db.query(Report.report_id).filter(
         Report.report_name==report_name,

@@ -64,3 +64,4 @@ class QueryRun(BaseModel): # the name should be changed to QueryRun in the upcom
 class ChatAcceptedResponse(BaseModel):
     query_id: UUID
     stream_url: str
+    

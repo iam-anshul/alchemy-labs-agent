@@ -1,4 +1,6 @@
 import os
+import hashlib
+import traceback
 from pathlib import Path
 from orchestrator import plannerAgent, PlannerDeps
 from browser_agent import BrowserExecutor, ExecutorResult
@@ -7,9 +9,10 @@ from report_schemas import ReportResult
 from office_agent import run_office_executor
 from web_agent import run_web_executor
 from api.ingest import start_workers, shutdown_workers
+from api.routes.documents import ingest_local_file
 from db import SessionLocal
 from db import utils as db_utils
-from formats_pydantic import QueryRun, PlanOutput, TaskSpec, ChatAcceptedResponse
+from formats_pydantic import QueryRun, PlanOutput, TaskSpec, ChatAcceptedResponse, InternalDocAgentDeps
 from render_todo import render_todo
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart, TextPart
 from time import time
@@ -71,6 +74,7 @@ def _plan_signature(plan: PlanOutput) -> tuple:
                 t.id,
                 t.title,
                 t.agent,
+                t.doc_deps,
                 tuple(getattr(d, "id", d) for d in t.deps),
                 t.query,
                 t.expects,
@@ -93,7 +97,7 @@ def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
     for t in new.tasks:
         if t.id in old_by_id:
             old_t = old_by_id[t.id]
-            rewritten = (t.query, t.expects, t.agent) != (old_t.query, old_t.expects, old_t.agent)
+            rewritten = (t.query, t.expects, t.agent, t.doc_deps, t.deps) != (old_t.query, old_t.expects, old_t.agent, old_t.doc_deps, old_t.deps)
             if old_t.status == "failed" and rewritten:
                 # planner changed approach for a failed task -> let it run again.
                 # The old error/notes describe the abandoned approach, so clear
@@ -248,6 +252,96 @@ async def publish_todo_artifact(run: QueryRun, sink: EventSink, *, phase: str) -
         artifacts=[artifact],
     )
     
+# Terminal states for a Doc row's ingest pipeline (queued -> building_tree ->
+# ready | failed). We poll for these because ingestion runs async on the shared
+# worker queue; there is no per-doc await, and _ingest_queue.join() would block
+# on unrelated docs too.
+_INGEST_TERMINAL = {"ready", "failed"}
+INGEST_POLL_TIMEOUT_SECONDS = 3600
+INGEST_POLL_INTERVAL_SECONDS = 2
+
+
+async def ingest_dep_pdfs(
+    dep_files: list[str],
+    subdir_path: Path,
+    workspace_id: str,
+    user_id: UUID,
+    sink: EventSink,
+) -> list[str]:
+    pdfs = [p for p in dep_files if Path(p).suffix.lower() == ".pdf"]
+    if not pdfs:
+        return []
+
+    ready_ids: list[str] = []
+    for rel in pdfs:
+        full = subdir_path / rel
+        if not full.exists():
+            await sink.publish_ui(
+                "agent_progress",
+                stage="ingesting",
+                status="progress",
+                message=f"Skipping missing dep PDF {rel}",
+                data={"path": rel},
+            )
+            continue
+
+        # Reuse an already-ingested copy if this workspace has one. Scope is the
+        # workspace (which spans every chat run / subdir), not this run's subdir,
+        # and the match is by content hash (sha256 of the bytes) — ingest_local_file
+        # randomizes the saved source_path by doc_id so path can't be the key, and
+        # a filename can collide across genuinely different PDFs. Hashing skips the
+        # expensive re-ingest when the same PDF was ingested in a prior run, an
+        # uploaded doc the planner already resolved, or a retry of this task.
+        content_hash = hashlib.sha256(full.read_bytes()).hexdigest()
+        with SessionLocal() as db:
+            existing_id = db_utils.get_ready_docID_by_hash(db, workspace_id, content_hash)
+        if existing_id is not None:
+            ready_ids.append(existing_id)
+            await sink.publish_ui(
+                "agent_progress",
+                stage="ingesting",
+                status="progress",
+                message=f"Reusing already-ingested {full.name}",
+                data={"doc_id": existing_id, "path": rel},
+            )
+            continue
+
+        doc_id = ingest_local_file(full, workspace_id, str(user_id))
+
+        await sink.publish_ui(
+            "agent_progress",
+            stage="ingesting",
+            status="progress",
+            message=f"Ingesting {full.name}",
+            data={"doc_id": doc_id, "path": rel},
+        )
+
+        # Poll the Doc row until ingestion reaches a terminal state.
+        waited = 0.0
+        status = "queued"
+        while waited < INGEST_POLL_TIMEOUT_SECONDS:
+            with SessionLocal() as db:
+                doc = db_utils.get_doc(db, doc_id)
+                status = doc.status if doc is not None else "failed"
+            if status in _INGEST_TERMINAL:
+                break
+            await asyncio.sleep(INGEST_POLL_INTERVAL_SECONDS)
+            waited += INGEST_POLL_INTERVAL_SECONDS
+
+        if status == "ready":
+            ready_ids.append(doc_id)
+        else:
+            await sink.publish_ui(
+                "agent_progress",
+                stage="ingesting",
+                status="progress",
+                message=f"Ingest of {full.name} did not complete (status={status})",
+                data={"doc_id": doc_id, "path": rel, "status": status},
+            )
+
+    return ready_ids
+
+
 async def dispatch_executor_agent(
     task_spec: TaskSpec,
     dep_files: list[str],
@@ -301,31 +395,80 @@ async def dispatch_executor_agent(
             return office_result
         case "document_answering":
             this_sink = task_sink.child(agent_type="document_answering")
-            if task_spec.doc_deps.doc_answering_mode == "ASK":
+            # Resolve doc_deps with a sane default instead of failing. A
+            # structured-output planner frequently drops this optional nested
+            # object (or leaves doc_answering_mode unset) even when it intends a
+            # plain Q&A. ASK with doc_ids=None is the overwhelmingly common case
+            # — a focused question over the task's dep docs — and the control
+            # loop supplies the real doc_ids from ingestion below, so a missing
+            # doc_deps does not actually lose information. Only a genuine REPORT
+            # intent needs the field, and that mode is always stated explicitly;
+            # so we treat anything that isn't an explicit REPORT as ASK, while
+            # preserving any doc_ids/report_id/target_length the planner did set.
+            doc_deps = task_spec.doc_deps or InternalDocAgentDeps()
+            if doc_deps.doc_answering_mode not in ("ASK", "REPORT"):
+                doc_deps = doc_deps.model_copy(update={"doc_answering_mode": "ASK"})
+
+            # A dep browser task may have downloaded PDFs that no one has
+            # ingested yet. Ingest them now and combine the fresh doc_ids with
+            # any the planner pre-resolved (an already-ingested doc the user
+            # named). doc_ids=None scopes answer_query to all workspace docs;
+            # an explicit list scopes it to exactly these. We pass the explicit
+            # union when we ingested something, so a freshly-downloaded PDF is
+            # actually in scope instead of triggering "no documents found".
+            ingested_ids = await ingest_dep_pdfs(
+                dep_files=dep_files,
+                subdir_path=subdir_path,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                sink=this_sink,
+            )
+
+            # Guard: if this task depended on PDFs but NONE of them ingested
+            # successfully, do not silently fall through to doc_ids=None — that
+            # would scope the engine to every doc in the workspace and answer
+            # from the wrong sources (or "no documents found") instead of
+            # surfacing that the intended source never made it into the index.
+            # Fail the task so the loop retries / the planner can re-route.
+            dep_pdf_count = sum(1 for p in dep_files if Path(p).suffix.lower() == ".pdf")
+            if dep_pdf_count and not ingested_ids:
+                return ExecutorResult(
+                    produced=[],
+                    notes="",
+                    error=(
+                        f"none of the {dep_pdf_count} dependency PDF(s) could be "
+                        "ingested into the doc index; cannot answer without them"
+                    ),
+                )
+
+            planner_ids = doc_deps.doc_ids or []
+            combined_ids = list(dict.fromkeys([*planner_ids, *ingested_ids])) or None
+
+            if doc_deps.doc_answering_mode == "ASK":
 
                 doc_ask_result = await answer_query(
                     workspace_subdir_path=subdir_path,
                     workspace_id=workspace_id,
                     user_id=user_id,
                     query=task_spec.query,
-                    doc_ids=task_spec.doc_deps.doc_ids,
+                    doc_ids=combined_ids,
                     sink=this_sink
                 )
                 return ExecutorResult(
                     produced=[str(Path(doc_ask_result.output_path).relative_to(subdir_path))],
                     notes=f"Page targets: {doc_ask_result.page_targets} with confidence: {doc_ask_result.confidence} \n citations: {doc_ask_result.citations}"
                 )
-                
-            elif task_spec.doc_deps.doc_answering_mode == "REPORT":
+
+            else:  # doc_answering_mode == "REPORT" (guarded above to ASK | REPORT)
 
                 doc_draft_result = await draft_report(
                     workspace_subdir_path=subdir_path,
                     workspace_id=workspace_id,
                     user_id=str(user_id),
                     brief=task_spec.query,
-                    doc_ids=task_spec.doc_deps.doc_ids,
-                    target_length=task_spec.doc_deps.target_length,
-                    report_id=task_spec.doc_deps.report_id,
+                    doc_ids=combined_ids,
+                    target_length=doc_deps.target_length,
+                    report_id=doc_deps.report_id,
                     sink=this_sink # "Compare ESG strategies..."
                 )
                 return ExecutorResult(
@@ -598,18 +741,35 @@ async def create_chat(
 
                 # Retry the dispatch on error. Each attempt is a fresh executor, so
                 # a wedged browser session or transient hang doesn't carry over.
+                # An executor that *raises* (e.g. answer_query's "no documents
+                # found" ValueError) is caught and turned into a result.error, so
+                # the same retry/replan path handles it instead of the exception
+                # escaping the loop and killing the whole run as an orphaned task.
                 result = None
                 for attempt in range(1, MAX_DISPATCH_ATTEMPTS + 1):
-                    result = await dispatch_executor_agent(
-                        task,
-                        dep_files,
-                        Path(absolute_workspace_path_with_subdir),
-                        workspace_id=workspace_name,
-                        user_id=user_id,
-                        query_id=str(query_id),
-                        sink=sink,
-                        attempt=attempt,
-                    )
+                    try:
+                        result = await dispatch_executor_agent(
+                            task,
+                            dep_files,
+                            Path(absolute_workspace_path_with_subdir),
+                            workspace_id=workspace_name,
+                            user_id=user_id,
+                            query_id=str(query_id),
+                            sink=sink,
+                            attempt=attempt,
+                        )
+                    except Exception as e:
+                        # Full traceback to stdout so the real source of a raised
+                        # error (e.g. an IntegrityError and which DB call caused
+                        # it) is visible; result.error keeps only the short string
+                        # for the user/planner.
+                        print(f"[{task.id}] attempt {attempt}/{MAX_DISPATCH_ATTEMPTS} executor raised:")
+                        traceback.print_exc()
+                        result = ExecutorResult(
+                            produced=[],
+                            notes="",
+                            error=f"executor raised {type(e).__name__}: {e}",
+                        )
                     if not result.error:
                         break
                     print(f"[{task.id}] attempt {attempt}/{MAX_DISPATCH_ATTEMPTS} failed: {result.error}")
@@ -691,16 +851,25 @@ async def create_chat(
                                 status="progress",
                                 message="Re-running task with your feedback",
                             )
-                            result = await dispatch_executor_agent(
-                                task,
-                                dep_files,
-                                Path(absolute_workspace_path_with_subdir),
-                                workspace_id=workspace_name,
-                                user_id=user_id,
-                                query_id=str(query_id),
-                                sink=sink,
-                                attempt=1,
-                            )
+                            try:
+                                result = await dispatch_executor_agent(
+                                    task,
+                                    dep_files,
+                                    Path(absolute_workspace_path_with_subdir),
+                                    workspace_id=workspace_name,
+                                    user_id=user_id,
+                                    query_id=str(query_id),
+                                    sink=sink,
+                                    attempt=1,
+                                )
+                            except Exception as e:
+                                print(f"[{task.id}] HITL re-run executor raised:")
+                                traceback.print_exc()
+                                result = ExecutorResult(
+                                    produced=[],
+                                    notes="",
+                                    error=f"executor raised {type(e).__name__}: {e}",
+                                )
                             if result.error:
                                 await sink.child(task_id=task.id, agent_type=task.agent).publish_ui(
                                     "agent_ended",

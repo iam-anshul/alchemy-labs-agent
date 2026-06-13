@@ -257,6 +257,11 @@ class BrowserExecutor:
             },
         )
         browser = Browser(
+            proxy={
+                "server": "http://38.154.203.95:5863",
+                "username": "kfaxvgga",
+                "password": "3immlbucd1ys",
+            },
             headless=self.headless,
             downloads_path=str(self.workspace / "outputs"),
             cross_origin_iframes=False,   # maintainers' OWN docstring: avoids "hanging"

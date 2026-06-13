@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -28,13 +29,16 @@ def ingest_local_file(local_path: Path, workspace_id: str, user_id: str) -> str:
     upload_dir = Path(settings.api_upload_dir) / workspace_id
     upload_dir.mkdir(parents=True, exist_ok=True)
     saved_path = upload_dir / f"{doc_id}{local_path.suffix}"
-    saved_path.write_bytes(local_path.read_bytes())
+    raw = local_path.read_bytes()
+    saved_path.write_bytes(raw)
+    content_hash = hashlib.sha256(raw).hexdigest()
 
     with SessionLocal() as db:
         utils.create_doc(
             db, doc_id=doc_id, workspace_id=workspace_id,
             uploaded_by_user_id=user_id, title=local_path.name,
-            source_path=str(saved_path), status="queued",
+            source_path=str(saved_path), content_hash=content_hash,
+            status="queued",
         )
     enqueue_ingest(doc_id)
     return doc_id
@@ -75,6 +79,7 @@ async def upload_document(
 
     content = await file.read()
     saved_path.write_bytes(content)
+    content_hash = hashlib.sha256(content).hexdigest()
 
     with SessionLocal() as db:
         utils.create_doc(
@@ -84,6 +89,7 @@ async def upload_document(
             uploaded_by_user_id=current_user,
             title=file.filename,
             source_path=str(saved_path),
+            content_hash=content_hash,
             status="queued",
         )
 
