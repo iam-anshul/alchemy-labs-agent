@@ -9,7 +9,7 @@ from typing import Literal
 import mimetypes
 import asyncio
 
-from linkup import LinkupClient
+from exa_py import Exa
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -19,9 +19,9 @@ load_dotenv()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL")
-LINKUP_API_KEY = os.getenv("LINKUP_API_KEY")
+EXA_API_KEY = os.getenv("EXA_API_KEY")
 
-linkup_client = LinkupClient(api_key=LINKUP_API_KEY)
+exa_client = Exa(api_key=EXA_API_KEY)
 
 @dataclass
 class WebDeps:
@@ -57,13 +57,13 @@ All paths you pass to tools are relative to your workspace root.
 Write your outputs under outputs/.
 
 HOW TO WORK:
-Read any upstream input files first. Then use `web_search_with_linkup` as your
-primary tool to find information — it returns a synthesized, sourced answer
-plus source URLs. Use `fetch_url` only when you need the full contents of a
-specific page (e.g. one of those source URLs). Use the minimum number of web
-actions needed; do not search or fetch for sport. Persist your findings with
-`write_file`, and carry a source URL for every factual claim or figure you
-write — downstream tasks and the user rely on these.
+Read any upstream input files first. Then use `web_search` as your primary tool
+to find information — it returns a synthesized, sourced answer plus citation
+URLs. Use `fetch_url` only when you need the full contents of a specific page
+(e.g. one of those citation URLs). Use the minimum number of web actions needed;
+do not search or fetch for sport. Persist your findings with `write_file`, and
+carry a source URL for every factual claim or figure you write — downstream
+tasks and the user rely on these.
 
 WHEN DONE:
 Call the submit tool with:
@@ -165,55 +165,58 @@ def read_file(ctx: RunContext[WebDeps], path: str) -> str:
 
 
 @theWebAgent.tool_plain(retries=3)
-def web_search_with_linkup(query: str, depth: Literal["standard", "deep"]):
+def web_search(query: str, depth: Literal["standard", "deep"]):
     """Search the live web and get back a sourced answer.
 
     Use this as your primary way to find information, look up current facts or
     data, and discover authoritative source URLs. It does NOT return a raw list
-    of links — Linkup's agent reads the web and returns a synthesized `answer`
-    plus a list of `sources`, each with a title, URL, and snippet. If the answer
-    you need is fully in that response, you may not need to fetch_url at all; if
-    you need a page's full contents, take a URL from `sources` and pass it to
-    fetch_url.
+    of links — Exa reads the web and returns a synthesized `answer` plus a list
+    of `citations`, each with a url, title, and the source text it drew from. If
+    the answer you need is fully in that response, you may not need fetch_url at
+    all; if you need a page's full contents, take a url from `citations` and
+    pass it to fetch_url.
 
     Args:
         query: A specific, instruction-style natural-language query — not bare
-            keywords. State what you want and, where relevant, where to look;
-            Linkup follows instructions in the query literally. For example,
-            "Find Acme Corp's FY2025 annual report and return the PDF URL and
-            headline revenue and net income" works far better than "Acme
-            financials". Specific queries return better answers and cost fewer
-            calls.
-        depth: Search effort. Use "standard" for ordinary lookups — a single,
-            fast, cheap pass that handles most questions. Use "deep" only when
-            the question genuinely needs multi-step, iterative research that one
-            pass won't satisfy; it runs an iterative search-and-scrape loop that
-            is markedly slower and roughly 10x the cost, so do not reach for it
-            by default.
+            keywords. State what you want and, where relevant, where to look.
+            For example, "Find Acme Corp's FY2025 annual report and return the
+            PDF URL and headline revenue and net income" works far better than
+            "Acme financials". Specific queries return better answers.
+        depth: Search effort. Use "standard" for ordinary lookups — fast and
+            cheap, handles most questions. Use "deep" only when the question
+            genuinely needs multi-step reasoning that one pass won't satisfy; it
+            is markedly slower and more expensive, so do not reach for it by
+            default.
     """
-    return linkup_client.search(
-        query=query,
-        depth=depth,
-        output_type="sourcedAnswer"
-    )
+    model = "exa-pro" if depth == "deep" else "exa"
+    response = exa_client.answer(query, text=True, model=model)
+    return {
+        "answer": response.answer,
+        "citations": [
+            {"url": c.url, "title": c.title, "text": c.text}
+            for c in response.citations
+        ],
+    }
 
 @theWebAgent.tool_plain(retries=3)
 def fetch_url(url: str):
-    """Fetch a single web page and return its full contents as clean markdown.
+    """Fetch a single web page and return its full text contents.
 
-    JavaScript is rendered, so this works on dynamic / client-rendered pages too.
-    Use this when you already have a specific URL — typically one surfaced in the
-    `sources` of a web_search_with_linkup result — and you need the page's full
-    text (e.g. to extract a table, read a full article, or get details the search
-    answer only summarized), rather than the search engine's synthesized summary.
-    Returns page text as markdown, not a saved binary file.
+    Use this when you already have a specific URL — typically one surfaced in
+    the `citations` of a web_search result — and you need the page's full text
+    (e.g. to extract a table, read a full article, or get details the search
+    answer only summarized), rather than the search engine's synthesized
+    summary. Forces a fresh crawl. Returns page text, not a saved binary file.
 
     Args:
         url: The full, absolute URL of the page to fetch, including the scheme
             (e.g. "https://example.com/report"). Relative URLs or bare domains
             will not work.
     """
-    return linkup_client.fetch(url=url, render_js=True)
+    response = exa_client.get_contents([url], text=True, livecrawl="always")
+    if not response.results:
+        return f"ERROR: no content retrieved for {url}"
+    return response.results[0].text
 
 async def run_web_executor(
         workspace_subdir_path: Path,
