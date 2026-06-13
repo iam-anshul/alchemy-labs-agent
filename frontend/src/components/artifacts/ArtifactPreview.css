@@ -1,0 +1,199 @@
+.artifact-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  background: var(--color-surface);
+}
+
+.artifact-panel__header {
+  display: flex;
+  min-height: 50px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--color-line-subtle);
+}
+
+.artifact-panel__header strong {
+  min-width: 0;
+  overflow: hidden;
+  font: 500 0.72rem var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-panel__header > span:last-child {
+  color: var(--color-ink-faint);
+  font: 0.6rem var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.artifact-panel__body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: var(--space-5);
+}
+
+.status-preview {
+  display: flex;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: var(--space-3);
+  color: var(--color-ink-muted);
+  text-align: center;
+}
+
+.status-preview__pulse {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--color-live-line);
+  border-radius: 13px;
+  background: var(--color-live-soft);
+}
+
+.status-preview__pulse::after {
+  display: block;
+  width: 8px;
+  height: 8px;
+  margin: 16px auto;
+  border-radius: 50%;
+  background: var(--color-live);
+  animation: pulse 1.6s infinite;
+  content: "";
+}
+
+.status-preview__icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+  background: var(--color-panel);
+}
+
+.status-preview h2 {
+  max-width: 440px;
+  margin: 0;
+  color: var(--color-ink);
+  font: 450 1.2rem/1.4 var(--font-serif);
+}
+
+.status-preview p {
+  margin: 0;
+  color: var(--color-ink-faint);
+  font-size: 0.75rem;
+}
+
+.document-preview {
+  width: min(650px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: var(--space-7);
+  border: 1px solid var(--color-line-subtle);
+  border-radius: var(--radius-large);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-small);
+}
+
+.document-preview pre {
+  margin: 0;
+  color: var(--color-ink);
+  font: 400 0.88rem/1.75 var(--font-serif);
+  white-space: pre-wrap;
+}
+
+.screenshot-preview {
+  overflow: hidden;
+  min-height: 100%;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-large);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-medium);
+}
+
+.screenshot-preview__chrome {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 38px;
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--color-line-subtle);
+  color: var(--color-ink-faint);
+  font: 0.62rem var(--font-mono);
+}
+
+.screenshot-preview__chrome i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-line);
+}
+
+.screenshot-preview__chrome span {
+  margin-left: var(--space-2);
+}
+
+.screenshot-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.file-preview,
+.data-preview {
+  display: flex;
+  width: min(440px, 100%);
+  margin: 10vh auto 0;
+  align-items: center;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-7);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-large);
+  background: var(--color-panel);
+  text-align: center;
+}
+
+.file-preview__badge {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--color-blue);
+  color: white;
+  font: 700 0.65rem var(--font-mono);
+}
+
+.file-preview h3,
+.data-preview h3 {
+  margin: 0;
+  font: 500 1rem var(--font-mono);
+}
+
+.file-preview p,
+.file-preview > span {
+  margin: 0;
+  color: var(--color-ink-faint);
+  font: 0.68rem var(--font-mono);
+}
+
+.file-preview .button {
+  margin-top: var(--space-3);
+}
+
+.data-preview pre {
+  width: 100%;
+  max-height: 360px;
+  overflow: auto;
+  padding: var(--space-4);
+  background: var(--color-surface-raised);
+  color: var(--color-ink-muted);
+  font: 0.7rem/1.5 var(--font-mono);
+  text-align: left;
+  white-space: pre-wrap;
+}

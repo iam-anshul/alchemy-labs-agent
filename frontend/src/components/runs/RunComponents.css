@@ -1,0 +1,298 @@
+.event-timeline {
+  margin: 0;
+  padding: var(--space-3) var(--space-4) var(--space-6);
+  list-style: none;
+}
+
+.event-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  column-gap: var(--space-2);
+}
+
+.event-row__rail {
+  display: flex;
+  justify-content: center;
+}
+
+.event-row__rail::after {
+  position: absolute;
+  top: 27px;
+  bottom: 0;
+  left: 12px;
+  width: 1px;
+  background: var(--color-line-subtle);
+  content: "";
+}
+
+.event-row:last-child .event-row__rail::after {
+  display: none;
+}
+
+.event-node {
+  z-index: 1;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  margin-top: 8px;
+  place-items: center;
+  border: 1px solid var(--color-live);
+  border-radius: 50%;
+  background: var(--color-panel);
+  color: var(--color-live);
+}
+
+.event-node i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.event-node--progress i,
+.event-node--started i {
+  animation: pulse 1.6s infinite;
+}
+
+.event-node--failed {
+  border-color: var(--color-error);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+}
+
+.event-node--waiting {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.event-node--completed {
+  border-color: var(--color-green);
+  color: var(--color-green);
+}
+
+.event-row__content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 3px;
+  padding: 8px 10px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-medium);
+  background: transparent;
+  color: var(--color-ink);
+  text-align: left;
+}
+
+.event-row__content:hover {
+  background: var(--color-overlay);
+}
+
+.event-row__content[data-active="true"] {
+  border-color: var(--color-line);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-small);
+}
+
+.event-row__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--color-ink-faint);
+  font: 0.6rem var(--font-mono);
+}
+
+.activity-label {
+  color: var(--activity-color, var(--color-ink-muted));
+  font: 620 0.68rem var(--font-sans);
+  white-space: nowrap;
+}
+
+.activity-label--slate { --activity-color: var(--color-live); }
+.activity-label--blue { --activity-color: var(--color-blue); }
+.activity-label--green { --activity-color: var(--color-green); }
+.activity-label--brown { --activity-color: var(--color-brown); }
+.activity-label--purple { --activity-color: var(--color-purple); }
+
+.event-state {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--color-surface-raised);
+  color: var(--color-ink-muted);
+  font-size: 0.55rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.event-state--progress,
+.event-state--started {
+  background: var(--color-live-soft);
+  color: var(--color-live);
+}
+
+.event-state--failed {
+  background: var(--color-error-soft);
+  color: var(--color-error);
+}
+
+.event-state--waiting {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.event-row__message {
+  color: var(--color-ink);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.event-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.event-artifacts > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid var(--color-line-subtle);
+  border-radius: 5px;
+  background: var(--color-surface);
+  color: var(--color-ink-muted);
+  font: 0.62rem var(--font-mono);
+}
+
+.event-row__question {
+  grid-column: 2;
+  margin: 5px 0 var(--space-3);
+}
+
+.question-card {
+  padding: var(--space-4);
+  border: 1px solid var(--color-warning-line);
+  border-radius: var(--radius-large);
+  background: var(--color-warning-soft);
+}
+
+.question-card__eyebrow {
+  margin: 0 0 var(--space-2);
+  color: var(--color-warning);
+  font: 620 0.6rem var(--font-mono);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.question-card h3 {
+  margin: 0 0 var(--space-3);
+  font: 520 0.9rem/1.4 var(--font-sans);
+}
+
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.question-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 9px 11px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-medium);
+  background: var(--color-panel);
+  color: var(--color-ink);
+  text-align: left;
+}
+
+.question-option[data-selected="true"] {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.question-option > span {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--color-surface-raised);
+  font: 650 0.65rem var(--font-mono);
+}
+
+.question-option strong {
+  flex: 1;
+  font-size: 0.75rem;
+  font-weight: 520;
+}
+
+.question-option em {
+  color: var(--color-live);
+  font: normal 0.55rem var(--font-mono);
+  text-transform: uppercase;
+}
+
+.question-option i {
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--color-line);
+  border-radius: 50%;
+}
+
+.question-option[data-selected="true"] i {
+  border: 4px solid var(--color-warning);
+}
+
+.question-card__input {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-medium);
+  background: var(--color-panel);
+  color: var(--color-ink);
+  font: 0.78rem/1.5 var(--font-sans);
+  padding: var(--space-3);
+}
+
+.question-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.question-card__footer > span {
+  color: var(--color-ink-faint);
+  font: 0.6rem var(--font-mono);
+}
+
+.timeline-empty {
+  display: flex;
+  height: 100%;
+  min-height: 260px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--color-ink-faint);
+  text-align: center;
+}
+
+.timeline-empty strong {
+  color: var(--color-ink-muted);
+  font-size: 0.8rem;
+}
+
+.timeline-empty span {
+  font-size: 0.7rem;
+}
