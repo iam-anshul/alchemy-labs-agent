@@ -19,6 +19,7 @@ Before changing frontend code, read
 - Lucide React icons
 - Native `fetch`, `FormData`, and `EventSource`
 - React Markdown with GitHub-flavored Markdown support
+- Lazy DOCX, XLSX, PPTX, CSV, PDF, image, audio, and video previews
 - Plain CSS
 
 Do not add another library until the existing stack cannot solve a concrete
@@ -135,9 +136,9 @@ it, route unknown browser paths to `index.html`, and proxy `/auth`,
   `api.app:app` was started instead of `start_server.py`.
 - Database relation errors mean `alembic upgrade head` has not been run against
   the `DATABASE_URL` used by the backend.
-- Persisted run history and produced files are detected at runtime. When those
-  endpoints are absent, the frontend keeps live runs working and clearly marks
-  the unavailable sections.
+- Persisted run history and produced files are provided by the authenticated
+  workspace API. The UI still degrades cleanly when connected to an older
+  backend without those routes.
 
 ## Product Flow
 
@@ -299,8 +300,9 @@ architecture.
 - Submit free-text user feedback while a run is paused.
 - Preview styled markdown, todo plans, structured findings, fetched web pages,
   source links, and screenshots.
-- Reopen saved runs and download produced files when the optional persisted
-  APIs are available.
+- Browse every update inside a persistent agent execution using the horizontal
+  event scrubber.
+- Reopen saved runs, preview produced files, and download their original bytes.
 - Delete a workspace after confirmation.
 
 ## Backend Integration
@@ -318,6 +320,12 @@ The frontend uses these required routes from `start_server.py`:
 | `POST` | `/chat/user_chat` | Start a run or answer a paused run |
 | `GET` | `/chat/{runId}/stream` | Stream live run events |
 | `DELETE` | `/workspace/delete_workspace` | Delete a workspace after confirmation |
+| `GET` | `/workspace/summaries` | Load workspace counts and recent activity |
+| `GET` | `/workspace/{workspaceId}/runs` | Load persisted run history |
+| `GET` | `/workspace/{workspaceId}/runs/{runId}` | Reopen a saved run |
+| `GET` | `/workspace/{workspaceId}/outputs` | List all produced files |
+| `GET` | `/workspace/{workspaceId}/runs/{runId}/outputs` | List one run's files |
+| `GET` | `/workspace/{workspaceId}/runs/{runId}/outputs/{relativePath}` | Preview or download a produced file |
 
 The run page displays the submitted query from router state and falls back to
 the `data.query` field of the `run_started` event. Inline markdown, text, JSON,
@@ -329,12 +337,11 @@ File artifacts only display a download action when the backend provides an
 artifact `url`. The frontend does not invent a download route from an artifact
 path.
 
-### Optional Persisted APIs
+### Persisted API Compatibility
 
-The frontend calls these routes when available. A `404` marks the feature as
-unavailable without breaking live runs, document upload, or workspace
-management. When the routes are present, summaries, old runs, and produced
-files become active automatically.
+The current backend implements the contracts below. A `404` still marks the
+feature as unavailable without breaking live runs, document upload, or
+workspace management, which keeps the frontend usable with older deployments.
 
 #### Workspace summaries
 
@@ -385,11 +392,14 @@ Returns one object with the same fields as the workspace run-list item.
 [
   {
     "run_id": "550e8400-e29b-41d4-a716-446655440000",
+    "task_id": "t2",
     "filename": "supplier-risk.docx",
-    "relative_path": "supplier-risk.docx",
+    "relative_path": "outputs/supplier-risk.docx",
     "bytes": 48231,
+    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "modified_at": "2026-06-13T12:35:00Z",
-    "download_url": "/workspace/Vendor%20risk/runs/550e8400-e29b-41d4-a716-446655440000/outputs/supplier-risk.docx"
+    "preview_url": "/workspace/Vendor%20risk/runs/550e8400-e29b-41d4-a716-446655440000/outputs/supplier-risk.docx?disposition=inline",
+    "download_url": "/workspace/Vendor%20risk/runs/550e8400-e29b-41d4-a716-446655440000/outputs/supplier-risk.docx?disposition=attachment"
   }
 ]
 ```

@@ -1,0 +1,22 @@
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports["default"] = readXlsxFile;
+var _xmlBrowser = _interopRequireDefault(require("../xml/xmlBrowser.js"));
+var _unpackXlsxFileBrowser = _interopRequireDefault(require("./unpackXlsxFileBrowser.js"));
+var _parseSpreadsheetContents = _interopRequireDefault(require("../xlsx/parseSpreadsheetContents.js"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+/**
+ * Reads an `.xlsx` file.
+ * @param  {(File|Blob|ArrayBuffer)} input
+ * @param  {object} [options]
+ * @return {Promise<Sheet[]>}
+ */
+function readXlsxFile(input, options) {
+  return (0, _unpackXlsxFileBrowser["default"])(input).then(function (contents) {
+    return (0, _parseSpreadsheetContents["default"])(contents, _xmlBrowser["default"], options);
+  });
+}
+//# sourceMappingURL=readXlsxFileBrowser.js.map

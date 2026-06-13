@@ -1,0 +1,24 @@
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports["default"] = unpackXlsxFile;
+var _unzipFromStream = _interopRequireDefault(require("../zip/unzipFromStream.js"));
+var _convertInputToNodeStream = _interopRequireDefault(require("./convertInputToNodeStream.js"));
+var _convertValuesFromUint8ArraysToStrings = _interopRequireDefault(require("./convertValuesFromUint8ArraysToStrings.js"));
+var _filterZipArchiveEntry = _interopRequireDefault(require("./filterZipArchiveEntry.js"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+/**
+ * Unpacks `*.xlsx` file contents.
+ * An `.xlsx` file is really just a `.zip` archive with `.xml` files inside.
+ * @param  {(string|Stream|Buffer|Blob)} input
+ * @return {Promise<Record<string,string>} Resolves to an object holding `*.xlsx` file entries.
+ */
+function unpackXlsxFile(input) {
+  var stream = (0, _convertInputToNodeStream["default"])(input);
+  return (0, _unzipFromStream["default"])(stream, {
+    filter: _filterZipArchiveEntry["default"]
+  }).then(_convertValuesFromUint8ArraysToStrings["default"]);
+}
+//# sourceMappingURL=unpackXlsxFileNode.js.map

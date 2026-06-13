@@ -1,0 +1,15 @@
+import { strFromU8 } from 'fflate';
+
+/**
+ * @param {Record<string,Uint8Array} entries
+ * @returns {Record<string,string>}
+ */
+export default function convertValuesFromUint8ArraysToStrings(entries) {
+  var convertedEntries = {};
+  for (var _i = 0, _Object$keys = Object.keys(entries); _i < _Object$keys.length; _i++) {
+    var key = _Object$keys[_i];
+    convertedEntries[key] = strFromU8(entries[key]);
+  }
+  return convertedEntries;
+}
+//# sourceMappingURL=convertValuesFromUint8ArraysToStrings.js.map

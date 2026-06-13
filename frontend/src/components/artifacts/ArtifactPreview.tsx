@@ -1,19 +1,30 @@
 import { Download, FileText, Globe, Image, Search, Table2 } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import type { Artifact, RunEvent } from "../../types/events";
-import { formatBytes } from "../../utils/format";
 import { getActivityPresentation } from "../runs/activityPresentation";
 import "./ArtifactPreview.css";
 import MarkdownPreview from "./MarkdownPreview";
+import ProducedFilePreview, { getDownloadUrl } from "./ProducedFilePreview";
 
 interface ArtifactPreviewProps {
   event: RunEvent | null;
+  artifactOverride?: Artifact | null;
 }
 
-export default function ArtifactPreview({ event }: ArtifactPreviewProps) {
-  const artifact = event?.artifacts[0] ?? null;
+export default function ArtifactPreview({
+  event,
+  artifactOverride = null,
+}: ArtifactPreviewProps) {
+  const [artifactIndex, setArtifactIndex] = useState(0);
+  const artifacts = artifactOverride ? [artifactOverride] : event?.artifacts ?? [];
+  const artifact = artifacts[artifactIndex] ?? artifacts[0] ?? null;
   const activity = event ? getActivityPresentation(event) : null;
   const pageActivity = event ? parsePageActivity(event) : null;
+
+  useEffect(() => {
+    setArtifactIndex(0);
+  }, [artifactOverride, event?.id]);
 
   return (
     <section className="artifact-panel">
@@ -24,6 +35,20 @@ export default function ArtifactPreview({ event }: ArtifactPreviewProps) {
         <strong>{artifact?.filename ?? "Live focus"}</strong>
         <span>{artifact?.kind.replaceAll("_", " ") ?? "status"}</span>
       </header>
+      {artifacts.length > 1 && (
+        <div className="artifact-panel__tabs" aria-label="Event artifacts">
+          {artifacts.map((item, index) => (
+            <button
+              type="button"
+              data-active={artifactIndex === index}
+              key={`${item.path ?? item.filename ?? item.kind}-${index}`}
+              onClick={() => setArtifactIndex(index)}
+            >
+              {item.filename ?? item.kind.replaceAll("_", " ")}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="artifact-panel__body">
         {!artifact && pageActivity && <PageActivityPreview page={pageActivity} />}
         {!artifact && !pageActivity && <StatusPreview event={event} />}
@@ -49,7 +74,7 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
     );
   }
 
-  if (artifact.kind === "markdown" || artifact.kind === "final_answer") {
+  if (artifact.kind === "final_answer") {
     return (
       <MarkdownPreview
         content={artifact.content ?? "This document is ready."}
@@ -69,21 +94,20 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
     );
   }
 
-  if (artifact.kind === "file") {
+  if (artifact.kind === "file" || artifact.kind === "markdown") {
     const downloadUrl = getArtifactDownloadUrl(artifact);
     return (
-      <div className="file-preview">
-        <span className="file-preview__badge">
-          {(artifact.type ?? "file").toUpperCase()}
-        </span>
-        <h3>{artifact.filename ?? "Produced file"}</h3>
-        <p>{artifact.path}</p>
-        {artifact.bytes !== null && <span>{formatBytes(artifact.bytes)}</span>}
+      <div className="produced-file-shell">
         {downloadUrl && (
-          <a className="button button--outline" href={downloadUrl}>
-            <Download size={14} /> Download
-          </a>
+          <div className="produced-file-shell__actions">
+            <a className="button button--outline" href={downloadUrl}>
+              <Download size={14} /> Download
+            </a>
+          </div>
         )}
+        <div className="produced-file-shell__preview">
+          <ProducedFilePreview artifact={artifact} />
+        </div>
       </div>
     );
   }
@@ -92,13 +116,14 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
 }
 
 export function getArtifactDownloadUrl(artifact: Artifact): string | null {
-  if (!artifact.url) return null;
-  if (artifact.url.startsWith("/")) return artifact.url;
+  const downloadUrl = getDownloadUrl(artifact);
+  if (!downloadUrl) return null;
+  if (downloadUrl.startsWith("/")) return downloadUrl;
 
   try {
-    const parsed = new URL(artifact.url);
+    const parsed = new URL(downloadUrl);
     return parsed.protocol === "http:" || parsed.protocol === "https:"
-      ? artifact.url
+      ? downloadUrl
       : null;
   } catch {
     return null;

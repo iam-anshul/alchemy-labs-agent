@@ -1,0 +1,91 @@
+function _createForOfIteratorHelperLoose(o, allowArrayLike) { var it = typeof Symbol !== "undefined" && o[Symbol.iterator] || o["@@iterator"]; if (it) return (it = it.call(o)).next.bind(it); if (Array.isArray(o) || (it = _unsupportedIterableToArray(o)) || allowArrayLike && o && typeof o.length === "number") { if (it) o = it; var i = 0; return function () { if (i >= o.length) return { done: true }; return { done: false, value: o[i++] }; }; } throw new TypeError("Invalid attempt to iterate non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); }
+function _unsupportedIterableToArray(o, minLen) { if (!o) return; if (typeof o === "string") return _arrayLikeToArray(o, minLen); var n = Object.prototype.toString.call(o).slice(8, -1); if (n === "Object" && o.constructor) n = o.constructor.name; if (n === "Map" || n === "Set") return Array.from(o); if (n === "Arguments" || /^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(n)) return _arrayLikeToArray(o, minLen); }
+function _arrayLikeToArray(arr, len) { if (len == null || len > arr.length) len = arr.length; for (var i = 0, arr2 = new Array(len); i < len; i++) arr2[i] = arr[i]; return arr2; }
+import parseSpreadsheetInfo from './parseSpreadsheetInfo.js';
+import parseFilePaths from './parseFilePaths.js';
+import parseStyles from './parseStyles.js';
+import parseSharedStrings from './parseSharedStrings.js';
+import parseSheet from './parseSheet.js';
+
+// For an introduction in reading `.xlsx` files see "The minimum viable XLSX reader":
+// https://www.brendanlong.com/the-minimum-viable-xlsx-reader.html
+
+/**
+ * Reads data from an `.xlsx` file.
+ * @param  {Record<string,string>} contents - A map of `.xml` files inside the `.xlsx` file (which itself is just a zipped directory).
+ * @param  {object} xml — An object having a single property — `createDocument(string)` function.
+ * @param  {object} [options]
+ * @return {Sheet[]}
+ */
+export default function parseSpreadsheetContents(contents, xml) {
+  var options = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
+  var getFileContent = function getFileContent(filePath) {
+    if (!contents[filePath]) {
+      throw new Error("\"".concat(filePath, "\" file not found inside the *.xlsx file zip archive"));
+    }
+    return contents[filePath];
+  };
+
+  // Read the paths to certain files inside the `.xlsx` file, which is itself just a `.zip` archive.
+  // These paths aren't standardized between different spreadsheet editors.
+  // https://github.com/tidyverse/readxl/issues/104
+  var filePaths = parseFilePaths(getFileContent('xl/_rels/workbook.xml.rels'), xml);
+
+  // The usual file path for "shared strings" is "xl/sharedStrings.xml".
+  var sharedStrings = filePaths.sharedStrings ? parseSharedStrings(getFileContent(filePaths.sharedStrings), xml) : [];
+
+  // The usual file path for "styles" is "xl/styles.xml".
+  var styles = filePaths.styles ? parseStyles(getFileContent(filePaths.styles), xml) : {};
+  var _parseSpreadsheetInfo = parseSpreadsheetInfo(getFileContent('xl/workbook.xml'), xml),
+    sheets = _parseSpreadsheetInfo.sheets,
+    epoch1904 = _parseSpreadsheetInfo.epoch1904;
+  var sheetIdsToRead = options.sheets && options.sheets.map(function (sheet) {
+    return getSheetId(sheet, sheets);
+  });
+
+  // Parse sheets data.
+
+  var sheetsData = [];
+  for (var _i = 0, _Object$keys = Object.keys(filePaths.sheets); _i < _Object$keys.length; _i++) {
+    var sheetId = _Object$keys[_i];
+    if (sheetIdsToRead && !sheetIdsToRead.includes(sheetId)) {
+      continue;
+    }
+    sheetsData.push({
+      sheet: getSheetNameById(sheetId, sheets),
+      data: parseSheet(getFileContent(filePaths.sheets[sheetId]), xml, sharedStrings, styles, epoch1904, options)
+    });
+  }
+
+  // Return spreadsheet data.
+  return sheetsData;
+}
+function getSheetId(sheet, sheets) {
+  if (typeof sheet === 'string') {
+    for (var _iterator = _createForOfIteratorHelperLoose(sheets), _step; !(_step = _iterator()).done;) {
+      var _sheet = _step.value;
+      if (_sheet.name === sheet) {
+        return _sheet.relationId;
+      }
+    }
+    throw new Error("Sheet \"".concat(sheet, "\" not found. Available sheets: ").concat(sheets.map(function (_ref) {
+      var name = _ref.name;
+      return "\"".concat(name, "\"");
+    }).join(', ')));
+  } else {
+    if (sheet <= sheets.length) {
+      return sheets[sheet - 1].relationId;
+    }
+    throw new Error("Sheet number out of bounds: ".concat(sheet, ". Available sheets count: ").concat(sheets.length));
+  }
+}
+function getSheetNameById(sheetId, sheets) {
+  for (var _iterator2 = _createForOfIteratorHelperLoose(sheets), _step2; !(_step2 = _iterator2()).done;) {
+    var sheet = _step2.value;
+    if (sheet.relationId === sheetId) {
+      return sheet.name;
+    }
+  }
+  throw new Error("Sheet ID not found: ".concat(sheetId));
+}
+//# sourceMappingURL=parseSpreadsheetContents.js.map

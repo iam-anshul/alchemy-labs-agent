@@ -1,0 +1,177 @@
+.produced-image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+}
+
+.produced-frame {
+  width: 100%;
+  min-height: 100%;
+  border: 0;
+  background: white;
+}
+
+.produced-media {
+  width: min(620px, 100%);
+  margin: auto;
+}
+
+.produced-video {
+  width: 100%;
+  max-height: 100%;
+  margin: auto;
+  background: black;
+}
+
+.produced-code {
+  width: min(900px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  overflow: auto;
+  padding: var(--space-5);
+  border: 1px solid var(--color-line-subtle);
+  border-radius: var(--radius-large);
+  background: var(--color-ink);
+  color: var(--color-background);
+  font: 0.76rem/1.65 var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.produced-code--text {
+  background: var(--color-panel);
+  color: var(--color-ink);
+}
+
+.office-document {
+  width: min(820px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: clamp(var(--space-5), 5vw, var(--space-8));
+  border: 1px solid var(--color-line-subtle);
+  border-radius: var(--radius-large);
+  background: white;
+  color: #202124;
+  box-shadow: var(--shadow-small);
+  font: 0.9rem/1.65 var(--font-sans);
+}
+
+.office-document img {
+  max-width: 100%;
+}
+
+.office-document table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.office-document td,
+.office-document th {
+  padding: 6px 8px;
+  border: 1px solid #d8d8d8;
+}
+
+.workbook-preview {
+  display: flex;
+  min-width: 0;
+  min-height: 100%;
+  flex-direction: column;
+  border: 1px solid var(--color-line-subtle);
+  border-radius: var(--radius-large);
+  background: var(--color-panel);
+}
+
+.workbook-preview__tabs {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+  overflow-x: auto;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-line-subtle);
+}
+
+.workbook-preview__tabs button {
+  padding: 6px 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-ink-muted);
+  font-size: 0.66rem;
+  white-space: nowrap;
+}
+
+.workbook-preview__tabs button[data-active="true"] {
+  border-color: var(--color-line);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+}
+
+.data-table-wrap {
+  min-width: 0;
+  overflow: auto;
+}
+
+.produced-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font: 0.7rem/1.4 var(--font-sans);
+}
+
+.produced-table th,
+.produced-table td {
+  max-width: 360px;
+  padding: 7px 9px;
+  border-right: 1px solid var(--color-line-subtle);
+  border-bottom: 1px solid var(--color-line-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+
+.produced-table th {
+  position: sticky;
+  top: 0;
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+}
+
+.presentation-preview-shell {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  overflow: auto;
+  background: #dadde2;
+}
+
+.presentation-preview-shell > .preview-loading {
+  position: absolute;
+  inset: 0;
+}
+
+.presentation-preview {
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.presentation-preview > div:not(.preview-loading) {
+  margin: var(--space-4) auto;
+}
+
+.preview-loading {
+  display: flex;
+  min-height: 260px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--color-ink-faint);
+  font-size: 0.72rem;
+}
+
+.preview-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-error);
+}

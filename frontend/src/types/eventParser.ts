@@ -1,5 +1,6 @@
 import type {
   Artifact,
+  AgentExecutionGroup,
   PendingQuestion,
   RunEvent,
   RunEventName,
@@ -122,37 +123,60 @@ export function getRunQuery(
     : null;
 }
 
-export function compactRunEvents(events: RunEvent[]): RunEvent[] {
-  const compactEvents: RunEvent[] = [];
-  const eventIndexByGroup = new Map<string, number>();
+export function groupRunEvents(events: RunEvent[]): AgentExecutionGroup[] {
+  const groups: AgentExecutionGroup[] = [];
+  const groupById = new Map<string, AgentExecutionGroup>();
+  let plannerCycle = 0;
+  let activePlannerGroupId: string | null = null;
 
   for (const event of events) {
-    const group = getEventGroup(event);
-    const existingIndex = eventIndexByGroup.get(group);
+    let groupId: string;
 
-    if (existingIndex === undefined) {
-      eventIndexByGroup.set(group, compactEvents.length);
-      compactEvents.push(event);
+    if (event.event === "awaiting_user_input") {
+      groupId = `question:${event.id}`;
+    } else if (event.event === "run_started" || event.event === "run_ended") {
+      groupId = `run:${event.event}`;
+    } else if (event.task_id) {
+      groupId = [
+        "task",
+        event.task_id,
+        event.agent_type,
+        event.attempt ?? 1,
+      ].join(":");
+    } else if (event.agent_type === "planner") {
+      if (event.event === "agent_started" || activePlannerGroupId === null) {
+        plannerCycle += 1;
+        activePlannerGroupId = `planner:${plannerCycle}`;
+      }
+      groupId = activePlannerGroupId;
     } else {
-      compactEvents[existingIndex] = event;
+      groupId = `event:${event.id}`;
+    }
+
+    let group = groupById.get(groupId);
+    if (!group) {
+      group = {
+        id: groupId,
+        agentType: event.agent_type,
+        taskId: event.task_id,
+        attempt: event.attempt,
+        events: [],
+        latestEvent: event,
+      };
+      groupById.set(groupId, group);
+      groups.push(group);
+    }
+    group.events.push(event);
+    group.latestEvent = event;
+
+    if (
+      event.agent_type === "planner"
+      && event.event === "agent_ended"
+      && groupId === activePlannerGroupId
+    ) {
+      activePlannerGroupId = null;
     }
   }
 
-  return compactEvents.slice(-12);
-}
-
-function getEventGroup(event: RunEvent): string {
-  if (event.event === "run_started" || event.event === "run_ended") {
-    return event.event;
-  }
-  if (event.event === "awaiting_user_input") {
-    return `question:${event.id}`;
-  }
-  if (event.task_id) {
-    return `task:${event.task_id}`;
-  }
-  if (event.agent_type === "planner") {
-    return "planner";
-  }
-  return `${event.agent_type}:${event.stage}`;
+  return groups;
 }

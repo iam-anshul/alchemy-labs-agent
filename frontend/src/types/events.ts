@@ -60,3 +60,12 @@ export interface PendingQuestion {
   options: string[];
   recommendedOption: number | null;
 }
+
+export interface AgentExecutionGroup {
+  id: string;
+  agentType: string;
+  taskId: string | null;
+  attempt: number | null;
+  events: RunEvent[];
+  latestEvent: RunEvent;
+}

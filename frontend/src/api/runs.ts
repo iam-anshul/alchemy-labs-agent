@@ -56,6 +56,18 @@ export function listOutputs(workspaceId: string, signal?: AbortSignal) {
   );
 }
 
+export function listRunOutputs(
+  workspaceId: string,
+  runId: string,
+  signal?: AbortSignal,
+) {
+  return requestOptionalFeature<WorkspaceOutput[]>(
+    `/workspace/${encodeURIComponent(workspaceId)}/runs/${encodeURIComponent(runId)}/outputs`,
+    [],
+    signal,
+  );
+}
+
 export function startRun(workspaceId: string, queryText: string) {
   const query = new URLSearchParams({
     workspace_name: workspaceId,

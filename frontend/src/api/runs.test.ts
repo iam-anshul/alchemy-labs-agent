@@ -22,10 +22,13 @@ describe("persisted run APIs", () => {
     const outputs = [{
       workspace_id: "Research",
       run_id: "run-1",
+      task_id: "t1",
       relative_path: "brief.md",
       filename: "brief.md",
       bytes: 42,
-      created_at: "2026-06-14T10:00:00Z",
+      mime_type: "text/markdown",
+      modified_at: "2026-06-14T10:00:00Z",
+      preview_url: "/workspace/Research/runs/run-1/outputs/brief.md?disposition=inline",
       download_url: "/workspace/Research/runs/run-1/outputs/brief.md",
     }];
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(

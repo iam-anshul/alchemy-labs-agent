@@ -149,6 +149,11 @@
   line-height: 1.45;
 }
 
+.event-row__history {
+  color: var(--color-ink-faint);
+  font: 0.58rem var(--font-mono);
+}
+
 .event-artifacts {
   display: flex;
   flex-wrap: wrap;

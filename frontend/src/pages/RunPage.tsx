@@ -2,15 +2,18 @@ import { AlertCircle, Radio, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
-import { getRun, submitRunAnswer } from "../api/runs";
+import { getRun, listRunOutputs, submitRunAnswer } from "../api/runs";
 import ArtifactPreview from "../components/artifacts/ArtifactPreview";
 import AppShell from "../components/layout/AppShell";
+import EventScrubber from "../components/runs/EventScrubber";
 import EventTimeline from "../components/runs/EventTimeline";
+import OutputShelf from "../components/runs/OutputShelf";
 import { useAsyncData } from "../hooks/useAsyncData";
 import { useRunStream } from "../hooks/useRunStream";
 import type { WorkspaceRun } from "../types/api";
-import type { RunEvent } from "../types/events";
-import { getPendingQuestion, getRunQuery } from "../types/eventParser";
+import type { Artifact, RunEvent } from "../types/events";
+import { getPendingQuestion, getRunQuery, groupRunEvents } from "../types/eventParser";
+import { collectRunArtifacts, type RunArtifactEntry } from "../types/runArtifacts";
 import "./RunPage.css";
 
 interface RunLocationState {
@@ -27,6 +30,10 @@ export default function RunPage() {
     (signal) => getRun(decodedWorkspaceId, runId, signal),
     [decodedWorkspaceId, runId],
   );
+  const persistedOutputs = useAsyncData(
+    (signal) => listRunOutputs(decodedWorkspaceId, runId, signal),
+    [decodedWorkspaceId, runId],
+  );
   const shouldStream = Boolean(locationState?.streamUrl || locationState?.queryText)
     || persistedRun.data?.data?.status === "running";
   const { events, streamState, error: streamError } = useRunStream(
@@ -34,7 +41,10 @@ export default function RunPage() {
     locationState?.streamUrl,
     shouldStream,
   );
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [selectedOutputId, setSelectedOutputId] = useState<string | null>(null);
+  const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
   const [answeredQuestionEventIds, setAnsweredQuestionEventIds] = useState(
     () => new Set<string>(),
   );
@@ -45,9 +55,28 @@ export default function RunPage() {
     () => getDisplayEvents(events, persistedRun.data?.data ?? null),
     [events, persistedRun.data?.data],
   );
+  const executionGroups = useMemo(
+    () => groupRunEvents(displayEvents),
+    [displayEvents],
+  );
+  const selectedGroup = useMemo(
+    () => executionGroups.find((group) => group.id === selectedGroupId)
+      ?? executionGroups.at(-1)
+      ?? null,
+    [executionGroups, selectedGroupId],
+  );
   const selectedEvent = useMemo(
-    () => selectFocusedEvent(displayEvents, selectedEventId),
-    [displayEvents, selectedEventId],
+    () => selectedGroup?.events.find((event) => event.id === selectedEventId)
+      ?? selectedGroup?.latestEvent
+      ?? null,
+    [selectedEventId, selectedGroup],
+  );
+  const runArtifacts = useMemo(
+    () => collectRunArtifacts(
+      displayEvents,
+      persistedOutputs.data?.data ?? [],
+    ),
+    [displayEvents, persistedOutputs.data?.data],
   );
   const pendingQuestionEvent = [...displayEvents]
     .reverse()
@@ -67,6 +96,27 @@ export default function RunPage() {
   const historyUnavailable = persistedRun.data
     && !persistedRun.data.isAvailable
     && !shouldStream;
+  const isFollowingLive = selectedGroupId === null
+    && selectedEventId === null
+    && previewArtifact === null;
+
+  function followLive() {
+    setSelectedGroupId(null);
+    setSelectedEventId(null);
+    setSelectedOutputId(null);
+    setPreviewArtifact(null);
+  }
+
+  function selectOutput(output: RunArtifactEntry) {
+    setSelectedOutputId(output.id);
+    setPreviewArtifact(output.artifact);
+    if (!output.eventId) return;
+    const group = executionGroups.find((candidate) =>
+      candidate.events.some((event) => event.id === output.eventId)
+    );
+    setSelectedGroupId(group?.id ?? null);
+    setSelectedEventId(output.eventId);
+  }
 
   async function handleSubmitAnswer(answer: string) {
     if (!pendingQuestionEvent) return;
@@ -120,13 +170,13 @@ export default function RunPage() {
           <header className="timeline-pane__header">
             <div>
               <strong>Activity</strong>
-              <span>{displayEvents.length} updates</span>
+              <span>{executionGroups.length} agents · {displayEvents.length} updates</span>
             </div>
-            {selectedEventId && (
+            {!isFollowingLive && (
               <button
                 className="button button--ghost"
                 type="button"
-                onClick={() => setSelectedEventId(null)}
+                onClick={followLive}
               >
                 <Radio size={13} /> Follow live
               </button>
@@ -139,20 +189,40 @@ export default function RunPage() {
           </header>
           <div className="timeline-pane__body">
             <EventTimeline
-              events={displayEvents}
-              selectedEventId={selectedEvent?.id ?? null}
+              groups={executionGroups}
+              selectedGroupId={selectedGroup?.id ?? null}
               pendingQuestion={pendingQuestion}
               answeredQuestionEventIds={answeredQuestionEventIds}
               isSubmittingAnswer={isSubmittingAnswer}
-              onSelectEvent={(eventId) => {
-                setSelectedEventId((current) => current === eventId ? null : eventId);
+              onSelectEvent={(groupId) => {
+                setSelectedGroupId(groupId);
+                setSelectedEventId(null);
+                setSelectedOutputId(null);
+                setPreviewArtifact(null);
               }}
               onSubmitAnswer={handleSubmitAnswer}
             />
           </div>
         </section>
         <section className="focus-pane">
-          <ArtifactPreview event={selectedEvent} />
+          <ArtifactPreview
+            event={selectedEvent}
+            artifactOverride={previewArtifact}
+          />
+          <EventScrubber
+            events={selectedGroup?.events ?? []}
+            selectedEventId={selectedEvent?.id ?? null}
+            onSelectEvent={(eventId) => {
+              setSelectedEventId(eventId);
+              setSelectedOutputId(null);
+              setPreviewArtifact(null);
+            }}
+          />
+          <OutputShelf
+            outputs={runArtifacts}
+            selectedOutputId={selectedOutputId}
+            onSelectOutput={selectOutput}
+          />
         </section>
       </div>
     </AppShell>
@@ -166,24 +236,6 @@ function RunStatus({ status }: { status: string }) {
       {status === "live" ? "running" : status}
     </span>
   );
-}
-
-function selectFocusedEvent(
-  events: RunEvent[],
-  selectedEventId: string | null,
-) {
-  if (selectedEventId) {
-    const selectedEvent = events.find((event) => event.id === selectedEventId);
-    if (selectedEvent) return selectedEvent;
-  }
-  const artifactEvent = [...events]
-    .reverse()
-    .find((event) =>
-      event.artifacts.length > 0
-      || event.agent_type === "web_search"
-      || event.agent_type === "browser"
-    );
-  return artifactEvent ?? events.at(-1) ?? null;
 }
 
 export function getDisplayEvents(

@@ -10,10 +10,13 @@ describe("FileList", () => {
         documents={[]}
         outputs={[{
           run_id: "run-123456",
+          task_id: "t1",
           relative_path: "reports/brief.md",
           filename: "brief.md",
           bytes: 42,
+          mime_type: "text/markdown",
           modified_at: "2026-06-14T10:00:00Z",
+          preview_url: "/workspace/Research/runs/run-123456/outputs/reports/brief.md?disposition=inline",
           download_url: "/workspace/Research/runs/run-123456/outputs/reports/brief.md",
         }]}
         areOutputsAvailable

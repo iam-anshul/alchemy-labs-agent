@@ -32,10 +32,13 @@ export interface WorkspaceDocument {
 
 export interface WorkspaceOutput {
   run_id: string;
+  task_id: string | null;
   filename: string;
   relative_path: string;
   bytes: number;
+  mime_type: string | null;
   modified_at: string;
+  preview_url: string;
   download_url: string;
 }
 

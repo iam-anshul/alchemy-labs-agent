@@ -6,8 +6,7 @@ import {
   LoaderCircle,
 } from "lucide-react";
 
-import type { PendingQuestion, RunEvent } from "../../types/events";
-import { compactRunEvents } from "../../types/eventParser";
+import type { AgentExecutionGroup, PendingQuestion } from "../../types/events";
 import { formatClock } from "../../utils/format";
 import QuestionCard from "./QuestionCard";
 import {
@@ -17,8 +16,8 @@ import {
 import "./RunComponents.css";
 
 interface EventTimelineProps {
-  events: RunEvent[];
-  selectedEventId: string | null;
+  groups: AgentExecutionGroup[];
+  selectedGroupId: string | null;
   pendingQuestion: PendingQuestion | null;
   answeredQuestionEventIds: Set<string>;
   isSubmittingAnswer: boolean;
@@ -27,15 +26,15 @@ interface EventTimelineProps {
 }
 
 export default function EventTimeline({
-  events,
-  selectedEventId,
+  groups,
+  selectedGroupId,
   pendingQuestion,
   answeredQuestionEventIds,
   isSubmittingAnswer,
   onSelectEvent,
   onSubmitAnswer,
 }: EventTimelineProps) {
-  if (events.length === 0) {
+  if (groups.length === 0) {
     return (
       <div className="timeline-empty">
         <LoaderCircle size={20} className="spin" />
@@ -45,19 +44,25 @@ export default function EventTimeline({
     );
   }
 
-  const visibleEvents = compactRunEvents(events);
-
   return (
     <ol className="event-timeline">
-      {visibleEvents.map((event) => {
+      {groups.map((group) => {
+        const event = group.latestEvent;
         const activity = getActivityPresentation(event);
-        const isQuestion = event.event === "awaiting_user_input";
+        const questionEvent = group.events.find(
+          (groupEvent) => groupEvent.event === "awaiting_user_input",
+        );
+        const isQuestion = Boolean(questionEvent);
         const showQuestion = isQuestion
           && pendingQuestion
-          && !answeredQuestionEventIds.has(event.id);
+          && questionEvent
+          && !answeredQuestionEventIds.has(questionEvent.id);
+        const artifacts = group.events.flatMap(
+          (groupEvent) => groupEvent.artifacts,
+        );
 
         return (
-          <li className="event-row" key={event.id}>
+          <li className="event-row" key={group.id}>
             <div className="event-row__rail">
               <span className={`event-node event-node--${event.status}`}>
                 {event.status === "completed" ? <Check size={11} />
@@ -68,9 +73,9 @@ export default function EventTimeline({
             </div>
             <button
               className="event-row__content"
-              data-active={selectedEventId === event.id}
+              data-active={selectedGroupId === group.id}
               type="button"
-              onClick={() => onSelectEvent(event.id)}
+              onClick={() => onSelectEvent(group.id)}
             >
               <span className="event-row__meta">
                 <time>{formatClock(event.timestamp)}</time>
@@ -83,14 +88,18 @@ export default function EventTimeline({
                 {event.attempt && event.attempt > 1 && <span>retry {event.attempt}</span>}
               </span>
               <span className="event-row__message">{event.message}</span>
-              {event.artifacts.length > 0 && (
+              <span className="event-row__history">
+                {group.events.length} update{group.events.length === 1 ? "" : "s"}
+              </span>
+              {artifacts.length > 0 && (
                 <span className="event-artifacts">
-                  {event.artifacts.map((artifact, index) => (
+                  {artifacts.slice(-3).map((artifact, index) => (
                     <span key={`${artifact.filename ?? artifact.kind}-${index}`}>
                       <FileOutput size={12} />
                       {artifact.filename ?? artifact.kind}
                     </span>
                   ))}
+                  {artifacts.length > 3 && <span>+{artifacts.length - 3} more</span>}
                 </span>
               )}
             </button>

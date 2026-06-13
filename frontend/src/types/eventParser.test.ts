@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  compactRunEvents,
+  groupRunEvents,
   getPendingQuestion,
   getRunQuery,
   parseRunEvent,
@@ -80,8 +80,8 @@ describe("getRunQuery", () => {
   });
 });
 
-describe("compactRunEvents", () => {
-  it("keeps only the newest update for the same agent task", () => {
+describe("groupRunEvents", () => {
+  it("keeps every update inside one agent execution", () => {
     const first = parseRunEvent(
       "agent_progress",
       JSON.stringify({
@@ -103,7 +103,11 @@ describe("compactRunEvents", () => {
       1,
     );
 
-    expect(compactRunEvents([first, latest])).toEqual([latest]);
+    const groups = groupRunEvents([first, latest]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.events).toEqual([first, latest]);
+    expect(groups[0]?.latestEvent).toBe(latest);
   });
 
   it("keeps user questions as separate actionable updates", () => {
@@ -118,6 +122,30 @@ describe("compactRunEvents", () => {
       1,
     );
 
-    expect(compactRunEvents([first, second])).toHaveLength(2);
+    expect(groupRunEvents([first, second])).toHaveLength(2);
+  });
+
+  it("keeps planner cycles separate after each agent end", () => {
+    const started = parseRunEvent(
+      "agent_started",
+      JSON.stringify({ agent_type: "planner", message: "Planning" }),
+      0,
+    );
+    const ended = parseRunEvent(
+      "agent_ended",
+      JSON.stringify({ agent_type: "planner", message: "Plan ready" }),
+      1,
+    );
+    const replanning = parseRunEvent(
+      "agent_started",
+      JSON.stringify({ agent_type: "planner", message: "Replanning" }),
+      2,
+    );
+
+    const groups = groupRunEvents([started, ended, replanning]);
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0]?.events).toEqual([started, ended]);
+    expect(groups[1]?.events).toEqual([replanning]);
   });
 });

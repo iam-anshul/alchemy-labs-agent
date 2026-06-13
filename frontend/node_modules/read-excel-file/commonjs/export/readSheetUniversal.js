@@ -1,0 +1,29 @@
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports["default"] = readSheet;
+var _xml = _interopRequireDefault(require("../xml/xml.js"));
+var _unpackXlsxFileUniversal = _interopRequireDefault(require("./unpackXlsxFileUniversal.js"));
+var _parseSheet = _interopRequireDefault(require("./parseSheet.js"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+/**
+ * Reads a single sheet from an `.xlsx` file.
+ * @param  {(Blob|ArrayBuffer)} input
+ * @param  {(number|string)} [sheet] — Sheet number or sheet name
+ * @param  {object} [options]
+ * @return {Promise<SheetData>}
+ */
+function readSheet(input, sheet, options) {
+  // `sheet` argument is optional.
+  // It could be omitted while `options` argument is passed.
+  if (!options && sheet && typeof sheet !== 'number' && typeof sheet !== 'string') {
+    options = sheet;
+    sheet = undefined;
+  }
+  return (0, _unpackXlsxFileUniversal["default"])(input).then(function (contents) {
+    return (0, _parseSheet["default"])(contents, _xml["default"], sheet, options);
+  });
+}
+//# sourceMappingURL=readSheetUniversal.js.map

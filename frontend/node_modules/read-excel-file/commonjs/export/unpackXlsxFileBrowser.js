@@ -1,0 +1,39 @@
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports["default"] = unpackXlsxFile;
+var _unzipFromArrayBuffer = _interopRequireDefault(require("../zip/unzipFromArrayBuffer.js"));
+var _convertValuesFromUint8ArraysToStrings = _interopRequireDefault(require("./convertValuesFromUint8ArraysToStrings.js"));
+var _filterZipArchiveEntry = _interopRequireDefault(require("./filterZipArchiveEntry.js"));
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+// Uses an "async" function of the unzipper function
+// just because it feels more correct to use it over the "sync" one
+// because it isn't supposed to ever freeze the "main thread" (GUI).
+//
+// import unzipFromArrayBufferSync from '../zip/unzipFromArrayBufferSync.js'
+
+/**
+ * Unpacks `*.xlsx` file contents.
+ * An `.xlsx` file is really just a `.zip` archive with `.xml` files inside.
+ * @param  {(File|Blob|ArrayBuffer)} input
+ * @return {Promise<Record<string,string>} Resolves to an object holding `*.xlsx` file entries.
+ */
+function unpackXlsxFile(input) {
+  if (input instanceof File || input instanceof Blob) {
+    return input.arrayBuffer().then(getResultFromArrayBuffer);
+  }
+  return Promise.resolve(input).then(getResultFromArrayBuffer);
+}
+function getResultFromArrayBuffer(arrayBuffer) {
+  return (0, _unzipFromArrayBuffer["default"])(arrayBuffer, {
+    filter: _filterZipArchiveEntry["default"]
+  }).then(_convertValuesFromUint8ArraysToStrings["default"]);
+}
+
+// function getResultFromArrayBufferSync(arrayBuffer) {
+//  const result = unzipFromArrayBufferSync(arrayBuffer, { filter: filterZipArchiveEntry })
+// 	return convertValuesFromUint8ArraysToStrings(result)
+// }
+//# sourceMappingURL=unpackXlsxFileBrowser.js.map

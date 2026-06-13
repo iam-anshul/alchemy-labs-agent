@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import type { RunEvent } from "../../types/events";
@@ -69,6 +69,26 @@ describe("ArtifactPreview", () => {
     expect(screen.getByRole("link", { name: /download/i })).toHaveAttribute(
       "href",
       "/artifacts/brief.docx",
+    );
+  });
+
+  it("allows every artifact in one event to be selected", () => {
+    const event = fileEvent("/artifacts/brief.docx");
+    event.artifacts.push({
+      ...event.artifacts[0]!,
+      path: "outputs/appendix.pdf",
+      filename: "appendix.pdf",
+      type: "pdf",
+      mime_type: "application/pdf",
+      url: "/artifacts/appendix.pdf",
+    });
+    render(<ArtifactPreview event={event} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "appendix.pdf" }));
+
+    expect(screen.getByTitle("appendix.pdf")).toHaveAttribute(
+      "src",
+      "/artifacts/appendix.pdf",
     );
   });
 

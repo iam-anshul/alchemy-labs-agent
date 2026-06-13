@@ -38,6 +38,50 @@
   padding: var(--space-5);
 }
 
+.artifact-panel__tabs {
+  display: flex;
+  flex-shrink: 0;
+  gap: 5px;
+  overflow-x: auto;
+  padding: 7px var(--space-3);
+  border-bottom: 1px solid var(--color-line-subtle);
+  background: var(--color-surface);
+}
+
+.artifact-panel__tabs button {
+  padding: 5px 8px;
+  border: 1px solid var(--color-line-subtle);
+  border-radius: 5px;
+  background: var(--color-panel);
+  color: var(--color-ink-muted);
+  font-size: 0.62rem;
+  white-space: nowrap;
+}
+
+.artifact-panel__tabs button[data-active="true"] {
+  border-color: var(--color-blue);
+  background: var(--color-blue-soft);
+  color: var(--color-blue);
+}
+
+.produced-file-shell {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+
+.produced-file-shell__actions {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: flex-end;
+  padding-bottom: var(--space-3);
+}
+
+.produced-file-shell__preview {
+  min-height: 0;
+  flex: 1;
+}
+
 .status-preview {
   display: flex;
   min-height: 100%;
