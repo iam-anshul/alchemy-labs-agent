@@ -8,3 +8,4 @@ workspace
 db_data
 app_dump.sql
 file_system_root
+data/summary_distill/

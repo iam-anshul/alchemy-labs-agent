@@ -1,0 +1,96 @@
+.workspace-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.workspace-heading__mark {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--color-blue);
+  color: white;
+  font: 650 1.35rem var(--font-serif);
+}
+
+.workspace-heading h1 {
+  margin: 2px 0 3px;
+  font: 480 1.8rem var(--font-serif);
+}
+
+.workspace-heading p:last-child {
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: 0.8rem;
+}
+
+.run-composer {
+  padding: var(--space-5);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-large);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-small);
+}
+
+.run-composer label {
+  display: block;
+  margin-bottom: var(--space-3);
+  color: var(--color-ink-muted);
+  font: 600 0.64rem var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.run-composer textarea {
+  width: 100%;
+  min-height: 100px;
+  padding: 0;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font: 400 1.05rem/1.55 var(--font-serif);
+}
+
+.run-composer textarea::placeholder {
+  color: var(--color-ink-faint);
+}
+
+.run-composer footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-line-subtle);
+}
+
+.run-composer footer > span {
+  color: var(--color-ink-faint);
+  font: 0.65rem var(--font-mono);
+}
+
+.workspace-section {
+  margin-top: var(--space-8);
+}
+
+.section-heading {
+  margin-bottom: var(--space-3);
+}
+
+@media (max-width: 640px) {
+  .run-composer footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .run-composer .button {
+    justify-content: center;
+  }
+}

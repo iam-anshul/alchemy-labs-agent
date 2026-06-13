@@ -6,6 +6,7 @@ openai==2.38.0
 pydantic==2.13.4
 pydantic-settings==2.14.1
 python-dotenv==1.2.2
+datasets>=2.20.0,<4
 
 # Database (Postgres)
 SQLAlchemy==2.0.49
