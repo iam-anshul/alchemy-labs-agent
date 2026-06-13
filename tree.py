@@ -14,14 +14,16 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
 from sqlalchemy.orm import Session
 
 from api.events import EventSink
 from config import get_settings
-from db import utils
-from db.models import Node, Page
+
+if TYPE_CHECKING:
+    from db.models import Page
 
 # All tunables come from config / .env — see Settings in config.py.
 
@@ -202,9 +204,42 @@ CHILD SECTION SUMMARIES:
 """
 
 
+def build_leaf_summary_prompt(*, start: int, end: int, content: str) -> str:
+    return _LEAF_PROMPT.format(
+        start=start,
+        end=end,
+        content=content,
+    )
+
+
+def build_parent_summary_prompt(
+    *,
+    n_children: int,
+    start: int,
+    end: int,
+    titles: str,
+    content: str,
+) -> str:
+    return _PARENT_PROMPT.format(
+        n_children=n_children,
+        start=start,
+        end=end,
+        titles=titles,
+        content=content,
+    )
+
+
+def split_summary_title(text: str) -> tuple[str, str]:
+    if "TITLE:" in text:
+        summary, _, title_line = text.rpartition("TITLE:")
+        return summary.strip(), title_line.strip()
+    cleaned = text.strip()
+    return cleaned, cleaned[:80].split("\n")[0]
+
+
 async def _summarise(client: AsyncOpenAI, model: str, node: _Node, is_leaf: bool) -> None:
     if is_leaf:
-        prompt = _LEAF_PROMPT.format(
+        prompt = build_leaf_summary_prompt(
             start=node.start_page,
             end=node.end_page,
             content=node.content,
@@ -215,7 +250,7 @@ async def _summarise(client: AsyncOpenAI, model: str, node: _Node, is_leaf: bool
             for line in node.content.splitlines()
             if line.startswith("Section: ")
         ) or "—"
-        prompt = _PARENT_PROMPT.format(
+        prompt = build_parent_summary_prompt(
             n_children=len(node.child_ids),
             start=node.start_page,
             end=node.end_page,
@@ -229,13 +264,7 @@ async def _summarise(client: AsyncOpenAI, model: str, node: _Node, is_leaf: bool
         messages=[{"role": "user", "content": prompt}],
     )
     text = resp.choices[0].message.content or ""
-    if "TITLE:" in text:
-        summary, _, title_line = text.rpartition("TITLE:")
-        node.summary = summary.strip()
-        node.title = title_line.strip()
-    else:
-        node.summary = text.strip()
-        node.title = text.strip()[:80].split("\n")[0]
+    node.summary, node.title = split_summary_title(text)
 
 
 async def _summarise_level(
@@ -269,6 +298,9 @@ async def build_tree(
     sink: EventSink = EventSink(),
 ) -> str | None:
     """Build and persist the node tree for a doc. Returns root node_id."""
+    from db import utils
+    from db.models import Node
+
     await sink.publish("tree_started", {"doc_id": doc_id})
     pages = utils.list_pages(db, doc_id)
     if not pages:
