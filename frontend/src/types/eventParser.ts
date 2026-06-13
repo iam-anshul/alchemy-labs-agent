@@ -121,3 +121,38 @@ export function getRunQuery(
     ? eventQuery.trim()
     : null;
 }
+
+export function compactRunEvents(events: RunEvent[]): RunEvent[] {
+  const compactEvents: RunEvent[] = [];
+  const eventIndexByGroup = new Map<string, number>();
+
+  for (const event of events) {
+    const group = getEventGroup(event);
+    const existingIndex = eventIndexByGroup.get(group);
+
+    if (existingIndex === undefined) {
+      eventIndexByGroup.set(group, compactEvents.length);
+      compactEvents.push(event);
+    } else {
+      compactEvents[existingIndex] = event;
+    }
+  }
+
+  return compactEvents.slice(-12);
+}
+
+function getEventGroup(event: RunEvent): string {
+  if (event.event === "run_started" || event.event === "run_ended") {
+    return event.event;
+  }
+  if (event.event === "awaiting_user_input") {
+    return `question:${event.id}`;
+  }
+  if (event.task_id) {
+    return `task:${event.task_id}`;
+  }
+  if (event.agent_type === "planner") {
+    return "planner";
+  }
+  return `${event.agent_type}:${event.stage}`;
+}

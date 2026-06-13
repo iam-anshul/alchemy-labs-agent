@@ -18,6 +18,7 @@ Before changing frontend code, read
 - SuperTokens React SDK
 - Lucide React icons
 - Native `fetch`, `FormData`, and `EventSource`
+- React Markdown with GitHub-flavored Markdown support
 - Plain CSS
 
 Do not add another library until the existing stack cannot solve a concrete
@@ -134,8 +135,9 @@ it, route unknown browser paths to `index.html`, and proxy `/auth`,
   `api.app:app` was started instead of `start_server.py`.
 - Database relation errors mean `alembic upgrade head` has not been run against
   the `DATABASE_URL` used by the backend.
-- The frontend intentionally shows “Backend API required” for persisted run
-  history and saved output downloads. Those APIs do not exist yet.
+- Persisted run history and produced files are detected at runtime. When those
+  endpoints are absent, the frontend keeps live runs working and clearly marks
+  the unavailable sections.
 
 ## Product Flow
 
@@ -144,8 +146,8 @@ The first version has three routes:
 | Route | Responsibility |
 | --- | --- |
 | `/workspaces` | List and create workspaces. |
-| `/workspaces/:workspaceId` | Upload and list documents, start a run, and show unavailable persisted features. |
-| `/workspaces/:workspaceId/runs/:runId` | Stream run activity, answer questions, and inspect artifacts. |
+| `/workspaces/:workspaceId` | Upload and list documents, start a run, review saved runs and produced files, and delete the workspace. |
+| `/workspaces/:workspaceId/runs/:runId` | Stream compact live activity, answer questions, inspect web pages and artifacts, or reopen a saved run. |
 
 ## Project Structure
 
@@ -295,14 +297,17 @@ architecture.
 - Start a live agent run.
 - Stream and present run activity.
 - Submit free-text user feedback while a run is paused.
-- Preview inline markdown, structured findings, and screenshots.
-- Explain which persisted features are waiting on backend APIs.
+- Preview styled markdown, todo plans, structured findings, fetched web pages,
+  source links, and screenshots.
+- Reopen saved runs and download produced files when the optional persisted
+  APIs are available.
+- Delete a workspace after confirmation.
 
 ## Backend Integration
 
 ### Currently Connected
 
-The frontend calls only these routes from `start_server.py`:
+The frontend uses these required routes from `start_server.py`:
 
 | Method | Route | Frontend use |
 | --- | --- | --- |
@@ -312,19 +317,24 @@ The frontend calls only these routes from `start_server.py`:
 | `POST` | `/v1/workspaces/{workspaceId}/documents` | Upload a document |
 | `POST` | `/chat/user_chat` | Start a run or answer a paused run |
 | `GET` | `/chat/{runId}/stream` | Stream live run events |
+| `DELETE` | `/workspace/delete_workspace` | Delete a workspace after confirmation |
 
 The run page displays the submitted query from router state and falls back to
 the `data.query` field of the `run_started` event. Inline markdown, text, JSON,
-and screenshots are rendered from SSE artifact data.
+and screenshots are rendered from SSE artifact data. Web-search and browser
+updates render `data.url`, `data.title`, `data.sources`, and page text supplied
+as `data.content`, `data.text`, `data.page_content`, or `data.answer`.
 
 File artifacts only display a download action when the backend provides an
 artifact `url`. The frontend does not invent a download route from an artifact
 path.
 
-### Backend APIs Still Required
+### Optional Persisted APIs
 
-These contracts are documented for future backend work. Until they exist, the
-corresponding UI is visibly disabled.
+The frontend calls these routes when available. A `404` marks the feature as
+unavailable without breaking live runs, document upload, or workspace
+management. When the routes are present, summaries, old runs, and produced
+files become active automatically.
 
 #### Workspace summaries
 

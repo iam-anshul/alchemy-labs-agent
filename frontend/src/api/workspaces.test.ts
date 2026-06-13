@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { parseWorkspaceNames } from "./workspaces";
+import { deleteWorkspace, parseWorkspaceNames } from "./workspaces";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("parseWorkspaceNames", () => {
   it("accepts the current backend workspace-name response", () => {
@@ -13,6 +17,22 @@ describe("parseWorkspaceNames", () => {
   it("rejects an unexpected workspace response", () => {
     expect(() => parseWorkspaceNames([{ workspace_id: "Research" }])).toThrow(
       "unexpected format",
+    );
+  });
+});
+
+describe("deleteWorkspace", () => {
+  it("uses the current backend delete route and encodes the workspace name", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({ status: "deleted" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deleteWorkspace("Vendor risk");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/workspace/delete_workspace?workspace_name=Vendor+risk",
+      expect.objectContaining({ method: "DELETE" }),
     );
   });
 });

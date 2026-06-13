@@ -2,11 +2,13 @@ import { AlertCircle, Radio, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
-import { submitRunAnswer } from "../api/runs";
+import { getRun, submitRunAnswer } from "../api/runs";
 import ArtifactPreview from "../components/artifacts/ArtifactPreview";
 import AppShell from "../components/layout/AppShell";
 import EventTimeline from "../components/runs/EventTimeline";
+import { useAsyncData } from "../hooks/useAsyncData";
 import { useRunStream } from "../hooks/useRunStream";
+import type { WorkspaceRun } from "../types/api";
 import type { RunEvent } from "../types/events";
 import { getPendingQuestion, getRunQuery } from "../types/eventParser";
 import "./RunPage.css";
@@ -21,9 +23,16 @@ export default function RunPage() {
   const decodedWorkspaceId = decodeURIComponent(workspaceId);
   const location = useLocation();
   const locationState = location.state as RunLocationState | null;
+  const persistedRun = useAsyncData(
+    (signal) => getRun(decodedWorkspaceId, runId, signal),
+    [decodedWorkspaceId, runId],
+  );
+  const shouldStream = Boolean(locationState?.streamUrl || locationState?.queryText)
+    || persistedRun.data?.data?.status === "running";
   const { events, streamState, error: streamError } = useRunStream(
     runId,
     locationState?.streamUrl,
+    shouldStream,
   );
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [answeredQuestionEventIds, setAnsweredQuestionEventIds] = useState(
@@ -32,11 +41,15 @@ export default function RunPage() {
   const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
   const [answerError, setAnswerError] = useState<string | null>(null);
 
-  const selectedEvent = useMemo(
-    () => selectFocusedEvent(events, selectedEventId),
-    [events, selectedEventId],
+  const displayEvents = useMemo(
+    () => getDisplayEvents(events, persistedRun.data?.data ?? null),
+    [events, persistedRun.data?.data],
   );
-  const pendingQuestionEvent = [...events]
+  const selectedEvent = useMemo(
+    () => selectFocusedEvent(displayEvents, selectedEventId),
+    [displayEvents, selectedEventId],
+  );
+  const pendingQuestionEvent = [...displayEvents]
     .reverse()
     .find((event) =>
       event.event === "awaiting_user_input"
@@ -45,7 +58,15 @@ export default function RunPage() {
   const pendingQuestion = pendingQuestionEvent
     ? getPendingQuestion(pendingQuestionEvent)
     : null;
-  const runQuery = getRunQuery(events, locationState?.queryText);
+  const runQuery = persistedRun.data?.data?.user_query
+    ?? getRunQuery(displayEvents, locationState?.queryText);
+  const displayStatus = persistedRun.data?.data?.status === "completed"
+    || persistedRun.data?.data?.status === "failed"
+    ? persistedRun.data.data.status
+    : streamState;
+  const historyUnavailable = persistedRun.data
+    && !persistedRun.data.isAvailable
+    && !shouldStream;
 
   async function handleSubmitAnswer(answer: string) {
     if (!pendingQuestionEvent) return;
@@ -78,16 +99,20 @@ export default function RunPage() {
         },
         { label: `Run #${runId.slice(0, 8)}` },
       ]}
-      actions={<RunStatus status={streamState} />}
+      actions={<RunStatus status={displayStatus} />}
     >
       <div className="run-query">
         <span>query</span>
         <strong>{runQuery ?? "Waiting for run details..."}</strong>
       </div>
-      {(streamError || answerError) && (
+      {(streamError || answerError || historyUnavailable) && (
         <div className="run-alert" role="alert">
           <AlertCircle size={15} />
-          <span>{answerError ?? streamError}</span>
+          <span>
+            {answerError
+              ?? streamError
+              ?? "This backend cannot load saved run details yet."}
+          </span>
         </div>
       )}
       <div className="run-workspace">
@@ -95,9 +120,18 @@ export default function RunPage() {
           <header className="timeline-pane__header">
             <div>
               <strong>Activity</strong>
-              <span>{events.length} events</span>
+              <span>{displayEvents.length} updates</span>
             </div>
-            {streamState === "disconnected" && (
+            {selectedEventId && (
+              <button
+                className="button button--ghost"
+                type="button"
+                onClick={() => setSelectedEventId(null)}
+              >
+                <Radio size={13} /> Follow live
+              </button>
+            )}
+            {displayStatus === "disconnected" && (
               <button className="button button--ghost" type="button" onClick={() => window.location.reload()}>
                 <RefreshCw size={13} /> Reconnect
               </button>
@@ -105,7 +139,7 @@ export default function RunPage() {
           </header>
           <div className="timeline-pane__body">
             <EventTimeline
-              events={events}
+              events={displayEvents}
               selectedEventId={selectedEvent?.id ?? null}
               pendingQuestion={pendingQuestion}
               answeredQuestionEventIds={answeredQuestionEventIds}
@@ -139,10 +173,58 @@ function selectFocusedEvent(
   selectedEventId: string | null,
 ) {
   if (selectedEventId) {
-    return events.find((event) => event.id === selectedEventId) ?? null;
+    const selectedEvent = events.find((event) => event.id === selectedEventId);
+    if (selectedEvent) return selectedEvent;
   }
   const artifactEvent = [...events]
     .reverse()
-    .find((event) => event.artifacts.length > 0);
+    .find((event) =>
+      event.artifacts.length > 0
+      || event.agent_type === "web_search"
+      || event.agent_type === "browser"
+    );
   return artifactEvent ?? events.at(-1) ?? null;
+}
+
+export function getDisplayEvents(
+  liveEvents: RunEvent[],
+  persistedRun: WorkspaceRun | null,
+): RunEvent[] {
+  if (liveEvents.length > 0 || !persistedRun) {
+    return liveEvents;
+  }
+
+  const todoArtifact = persistedRun.todo_md
+    ? [{
+        kind: "markdown",
+        path: "todo.md",
+        filename: "todo.md",
+        type: "md",
+        mime_type: "text/markdown",
+        bytes: new TextEncoder().encode(persistedRun.todo_md).length,
+        content: persistedRun.todo_md,
+        content_base64: null,
+        url: null,
+        metadata: { historical: true },
+      }]
+    : [];
+
+  return [{
+    id: `saved-run-${persistedRun.query_id}`,
+    event: "run_ended",
+    query_id: persistedRun.query_id,
+    workspace_id: persistedRun.workspace_id,
+    run_id: persistedRun.query_id,
+    task_id: null,
+    agent_type: "system",
+    stage: "done",
+    status: persistedRun.status === "failed" ? "failed" : "completed",
+    message: persistedRun.status === "failed"
+      ? "Saved run failed"
+      : "Saved run completed",
+    attempt: null,
+    timestamp: new Date(persistedRun.started_at).getTime() / 1000,
+    data: {},
+    artifacts: todoArtifact,
+  }];
 }

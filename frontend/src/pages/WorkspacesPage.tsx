@@ -2,18 +2,22 @@ import { ArrowRight, Plus } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-import { createWorkspace, listWorkspaces } from "../api/workspaces";
+import {
+  createWorkspace,
+  listWorkspaceSummaries,
+} from "../api/workspaces";
 import AppShell from "../components/layout/AppShell";
 import { AsyncState } from "../components/ui/AsyncState";
 import Modal from "../components/ui/Modal";
 import { useAsyncData } from "../hooks/useAsyncData";
+import { formatRelativeTime } from "../utils/format";
 import "./WorkspacesPage.css";
 
 const WORKSPACE_COLORS = ["blue", "green", "brown", "purple", "red", "slate"];
 
 export default function WorkspacesPage() {
   const { data, error, isLoading, reload } = useAsyncData(
-    (signal) => listWorkspaces(signal),
+    (signal) => listWorkspaceSummaries(signal),
     [],
   );
   const [isCreating, setIsCreating] = useState(false);
@@ -75,23 +79,36 @@ export default function WorkspacesPage() {
 
       {data && data.length > 0 && (
         <section className="workspace-grid" aria-label="Workspaces">
-          {data.map((workspaceName, index) => (
+          {data.map((workspace, index) => (
             <Link
               className="workspace-card"
-              to={`/workspaces/${encodeURIComponent(workspaceName)}`}
-              key={workspaceName}
+              to={`/workspaces/${encodeURIComponent(workspace.workspace_id)}`}
+              key={workspace.workspace_id}
             >
               <div className="workspace-card__top">
                 <span
                   className={`workspace-card__mark workspace-card__mark--${WORKSPACE_COLORS[index % WORKSPACE_COLORS.length]}`}
                 >
-                  {workspaceName.slice(0, 1).toUpperCase()}
+                  {workspace.workspace_id.slice(0, 1).toUpperCase()}
                 </span>
-                <span className="workspace-card__type">workspace</span>
+                {workspace.last_activity_at ? (
+                  <time dateTime={workspace.last_activity_at}>
+                    {formatRelativeTime(workspace.last_activity_at)}
+                  </time>
+                ) : (
+                  <span className="workspace-card__type">workspace</span>
+                )}
               </div>
-              <h2>{workspaceName}</h2>
+              <h2>{workspace.workspace_id}</h2>
               <div className="workspace-card__stats">
-                <span>Open documents and start a run</span>
+                {workspace.document_count === null ? (
+                  <span>Open documents and start a run</span>
+                ) : (
+                  <>
+                    <span><b>{workspace.document_count}</b> files</span>
+                    <span><b>{workspace.run_count ?? 0}</b> runs</span>
+                  </>
+                )}
                 <ArrowRight size={15} />
               </div>
             </Link>

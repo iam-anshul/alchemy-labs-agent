@@ -21,7 +21,11 @@ export function getRunStreamUrl(runId: string, acceptedStreamUrl?: string) {
   return `/chat/${encodeURIComponent(runId)}/stream`;
 }
 
-export function useRunStream(runId: string, acceptedStreamUrl?: string) {
+export function useRunStream(
+  runId: string,
+  acceptedStreamUrl?: string,
+  isEnabled = true,
+) {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [streamState, setStreamState] = useState<StreamState>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +36,10 @@ export function useRunStream(runId: string, acceptedStreamUrl?: string) {
     setStreamState("connecting");
     setError(null);
     sequence.current = 0;
+
+    if (!isEnabled) {
+      return;
+    }
 
     const source = new EventSource(getRunStreamUrl(runId, acceptedStreamUrl), {
       withCredentials: true,
@@ -81,7 +89,7 @@ export function useRunStream(runId: string, acceptedStreamUrl?: string) {
       });
       source.close();
     };
-  }, [acceptedStreamUrl, runId]);
+  }, [acceptedStreamUrl, isEnabled, runId]);
 
   return { events, streamState, error };
 }

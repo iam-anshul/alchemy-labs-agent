@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import type { PendingQuestion, RunEvent } from "../../types/events";
+import { compactRunEvents } from "../../types/eventParser";
 import { formatClock } from "../../utils/format";
 import QuestionCard from "./QuestionCard";
 import {
@@ -44,9 +45,11 @@ export default function EventTimeline({
     );
   }
 
+  const visibleEvents = compactRunEvents(events);
+
   return (
     <ol className="event-timeline">
-      {events.map((event) => {
+      {visibleEvents.map((event) => {
         const activity = getActivityPresentation(event);
         const isQuestion = event.event === "awaiting_user_input";
         const showQuestion = isQuestion

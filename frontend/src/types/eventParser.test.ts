@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  compactRunEvents,
   getPendingQuestion,
   getRunQuery,
   parseRunEvent,
@@ -76,5 +77,47 @@ describe("getRunQuery", () => {
     );
 
     expect(getRunQuery([event])).toBe("Compare the uploaded contracts");
+  });
+});
+
+describe("compactRunEvents", () => {
+  it("keeps only the newest update for the same agent task", () => {
+    const first = parseRunEvent(
+      "agent_progress",
+      JSON.stringify({
+        task_id: "task-1",
+        agent_type: "web_search",
+        stage: "searching",
+        message: "Searching",
+      }),
+      0,
+    );
+    const latest = parseRunEvent(
+      "agent_progress",
+      JSON.stringify({
+        task_id: "task-1",
+        agent_type: "web_search",
+        stage: "searching",
+        message: "Found 8 sources",
+      }),
+      1,
+    );
+
+    expect(compactRunEvents([first, latest])).toEqual([latest]);
+  });
+
+  it("keeps user questions as separate actionable updates", () => {
+    const first = parseRunEvent(
+      "awaiting_user_input",
+      JSON.stringify({ message: "Choose scope", data: { question: "Scope?" } }),
+      0,
+    );
+    const second = parseRunEvent(
+      "awaiting_user_input",
+      JSON.stringify({ message: "Choose format", data: { question: "Format?" } }),
+      1,
+    );
+
+    expect(compactRunEvents([first, second])).toHaveLength(2);
   });
 });

@@ -1,14 +1,17 @@
-import { Play } from "lucide-react";
+import { ArrowRight, Play, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { listDocuments, uploadDocument } from "../api/documents";
-import { startRun } from "../api/runs";
+import { listOutputs, listRuns, startRun } from "../api/runs";
+import { deleteWorkspace } from "../api/workspaces";
 import FileList from "../components/files/FileList";
 import AppShell from "../components/layout/AppShell";
 import BackendFeatureNotice from "../components/ui/BackendFeatureNotice";
 import { AsyncState } from "../components/ui/AsyncState";
+import Modal from "../components/ui/Modal";
 import { useAsyncData } from "../hooks/useAsyncData";
+import { formatRelativeTime } from "../utils/format";
 import "./WorkspacePage.css";
 
 export default function WorkspacePage() {
@@ -18,10 +21,19 @@ export default function WorkspacePage() {
   const [query, setQuery] = useState("");
   const [isStarting, setIsStarting] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const documentsData = useAsyncData(
-    (signal) => listDocuments(decodedWorkspaceId, signal),
+  const workspaceData = useAsyncData(
+    async (signal) => {
+      const [documents, runs, outputs] = await Promise.all([
+        listDocuments(decodedWorkspaceId, signal),
+        listRuns(decodedWorkspaceId, signal),
+        listOutputs(decodedWorkspaceId, signal),
+      ]);
+      return { documents, runs, outputs };
+    },
     [decodedWorkspaceId],
   );
 
@@ -57,7 +69,7 @@ export default function WorkspacePage() {
       for (const file of files) {
         await uploadDocument(decodedWorkspaceId, file);
       }
-      documentsData.reload();
+      workspaceData.reload();
     } catch (requestError) {
       setActionError(
         requestError instanceof Error ? requestError.message : "Could not upload files",
@@ -67,12 +79,40 @@ export default function WorkspacePage() {
     }
   }
 
+  async function handleDeleteWorkspace() {
+    setIsDeleting(true);
+    setActionError(null);
+    try {
+      await deleteWorkspace(decodedWorkspaceId);
+      navigate("/workspaces", { replace: true });
+    } catch (requestError) {
+      setActionError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Could not delete workspace",
+      );
+      setIsDeleteOpen(false);
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   return (
     <AppShell
       crumbs={[
         { label: "Workspaces", to: "/workspaces" },
         { label: decodedWorkspaceId },
       ]}
+      actions={(
+        <button
+          className="button button--ghost button--danger"
+          type="button"
+          onClick={() => setIsDeleteOpen(true)}
+        >
+          <Trash2 size={14} />
+          Delete workspace
+        </button>
+      )}
     >
       <header className="workspace-heading">
         <span className="workspace-heading__mark">
@@ -81,8 +121,13 @@ export default function WorkspacePage() {
         <div>
           <p className="eyebrow">Workspace</p>
           <h1>{decodedWorkspaceId}</h1>
-          {documentsData.data && (
-            <p>{documentsData.data.length} files in scope</p>
+          {workspaceData.data && (
+            <p>
+              {workspaceData.data.documents.length} files in scope
+              {workspaceData.data.runs.isAvailable
+                ? ` · ${workspaceData.data.runs.data.length} runs`
+                : ""}
+            </p>
           )}
         </div>
       </header>
@@ -117,26 +162,56 @@ export default function WorkspacePage() {
 
       {actionError && <p className="form-error" role="alert">{actionError}</p>}
 
-      {documentsData.isLoading && <AsyncState title="Loading workspace..." />}
-      {documentsData.error && (
+      {workspaceData.isLoading && <AsyncState title="Loading workspace..." />}
+      {workspaceData.error && (
         <AsyncState
           title="Could not load this workspace"
-          detail={documentsData.error}
+          detail={workspaceData.error}
           actionLabel="Try again"
-          onAction={documentsData.reload}
+          onAction={workspaceData.reload}
         />
       )}
 
-      {documentsData.data && (
+      {workspaceData.data && (
         <>
           <section className="workspace-section">
             <div className="section-heading">
               <p className="eyebrow">Recent runs</p>
             </div>
-            <BackendFeatureNotice
-              title="Run history is not available yet"
-              detail="The current backend can start and stream live runs, but it does not expose a workspace run-list endpoint."
-            />
+            {workspaceData.data.runs.isAvailable ? (
+              <div className="run-list">
+                {workspaceData.data.runs.data.map((run) => (
+                  <button
+                    className="run-row"
+                    type="button"
+                    key={run.query_id}
+                    onClick={() => navigate(
+                      `/workspaces/${encodeURIComponent(decodedWorkspaceId)}/runs/${run.query_id}`,
+                    )}
+                  >
+                    <span className={`run-row__dot run-row__dot--${run.status}`} />
+                    <span className="run-row__title">{run.user_query}</span>
+                    <span className={`status-pill status-pill--${run.status}`}>
+                      {run.status}
+                    </span>
+                    <time dateTime={run.started_at}>
+                      {formatRelativeTime(run.started_at)}
+                    </time>
+                    <ArrowRight size={14} />
+                  </button>
+                ))}
+                {workspaceData.data.runs.data.length === 0 && (
+                  <div className="run-list__empty">
+                    No runs yet. Start one above.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <BackendFeatureNotice
+                title="Run history is not available yet"
+                detail="The active backend does not expose the workspace run-list endpoint."
+              />
+            )}
           </section>
 
           <section className="workspace-section">
@@ -144,22 +219,48 @@ export default function WorkspacePage() {
               <p className="eyebrow">Files</p>
             </div>
             <FileList
-              documents={documentsData.data}
+              documents={workspaceData.data.documents}
+              outputs={workspaceData.data.outputs.data}
+              areOutputsAvailable={workspaceData.data.outputs.isAvailable}
               isUploading={isUploading}
               onUpload={handleUpload}
             />
           </section>
 
-          <section className="workspace-section">
-            <div className="section-heading">
-              <p className="eyebrow">Produced files</p>
-            </div>
+          {!workspaceData.data.outputs.isAvailable && (
             <BackendFeatureNotice
               title="Saved output downloads are not available yet"
-              detail="Artifacts can be previewed while a run is live. Listing and downloading saved outputs requires additional backend endpoints."
+              detail="Artifacts can be previewed live, but this backend does not expose saved output listing and download endpoints."
             />
-          </section>
+          )}
         </>
+      )}
+
+      {isDeleteOpen && (
+        <Modal title="Delete workspace" onClose={() => setIsDeleteOpen(false)}>
+          <p className="delete-confirmation">
+            Delete <strong>{decodedWorkspaceId}</strong> and all of its runs,
+            documents, and produced files? This cannot be undone.
+          </p>
+          <footer className="modal__actions">
+            <button
+              className="button button--ghost"
+              type="button"
+              disabled={isDeleting}
+              onClick={() => setIsDeleteOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="button button--danger-solid"
+              type="button"
+              disabled={isDeleting}
+              onClick={() => void handleDeleteWorkspace()}
+            >
+              {isDeleting ? "Deleting..." : "Delete workspace"}
+            </button>
+          </footer>
+        </Modal>
       )}
     </AppShell>
   );

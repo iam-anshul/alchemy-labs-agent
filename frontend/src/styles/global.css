@@ -121,6 +121,23 @@ button:disabled {
   color: var(--color-ink);
 }
 
+.button--danger {
+  color: var(--color-error);
+}
+
+.button--danger:hover:not(:disabled) {
+  background: var(--color-error-soft);
+}
+
+.button--danger-solid {
+  background: var(--color-error);
+  color: white;
+}
+
+.button--danger-solid:hover:not(:disabled) {
+  opacity: 0.88;
+}
+
 .button:disabled {
   opacity: 0.42;
 }

@@ -1,10 +1,10 @@
 export interface WorkspaceSummary {
   workspace_id: string;
-  document_count: number;
-  run_count: number;
-  running_run_count: number;
-  created_at: string;
-  last_activity_at: string;
+  document_count: number | null;
+  run_count: number | null;
+  running_run_count: number | null;
+  created_at: string | null;
+  last_activity_at: string | null;
 }
 
 export interface WorkspaceRun {

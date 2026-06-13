@@ -4,6 +4,7 @@ import type { Artifact, RunEvent } from "../../types/events";
 import { formatBytes } from "../../utils/format";
 import { getActivityPresentation } from "../runs/activityPresentation";
 import "./ArtifactPreview.css";
+import MarkdownPreview from "./MarkdownPreview";
 
 interface ArtifactPreviewProps {
   event: RunEvent | null;
@@ -12,7 +13,7 @@ interface ArtifactPreviewProps {
 export default function ArtifactPreview({ event }: ArtifactPreviewProps) {
   const artifact = event?.artifacts[0] ?? null;
   const activity = event ? getActivityPresentation(event) : null;
-  const search = event ? parseSearch(event) : null;
+  const pageActivity = event ? parsePageActivity(event) : null;
 
   return (
     <section className="artifact-panel">
@@ -24,8 +25,8 @@ export default function ArtifactPreview({ event }: ArtifactPreviewProps) {
         <span>{artifact?.kind.replaceAll("_", " ") ?? "status"}</span>
       </header>
       <div className="artifact-panel__body">
-        {!artifact && search && <SearchPreview search={search} />}
-        {!artifact && !search && <StatusPreview event={event} />}
+        {!artifact && pageActivity && <PageActivityPreview page={pageActivity} />}
+        {!artifact && !pageActivity && <StatusPreview event={event} />}
         {artifact && <ArtifactContent artifact={artifact} />}
       </div>
     </section>
@@ -50,18 +51,20 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
 
   if (artifact.kind === "markdown" || artifact.kind === "final_answer") {
     return (
-      <article className="document-preview">
-        <pre>{artifact.content ?? "This document is ready."}</pre>
-      </article>
+      <MarkdownPreview
+        content={artifact.content ?? "This document is ready."}
+        filename={artifact.filename}
+      />
     );
   }
 
   if (artifact.kind === "extracted_content") {
+    const content = artifact.content ?? JSON.stringify(artifact.metadata, null, 2);
     return (
       <article className="data-preview">
         <Table2 size={22} />
         <h3>{artifact.filename ?? "Extracted findings"}</h3>
-        <pre>{JSON.stringify(artifact.metadata, null, 2)}</pre>
+        <pre>{content}</pre>
       </article>
     );
   }
@@ -105,58 +108,102 @@ export function getArtifactDownloadUrl(artifact: Artifact): string | null {
 interface SearchSource {
   url: string;
   title: string | null;
+  text: string | null;
 }
 
-interface ParsedSearch {
+interface PageActivity {
+  kind: "search" | "page";
   query: string | null;
   depth: string | null;
   url: string | null;
+  title: string | null;
+  content: string | null;
   sources: SearchSource[];
 }
 
-/** Lift the web-search/fetch_url fields the backend puts on `event.data` into a
- * typed shape, or null when this isn't a web-search event. Mirrors the
- * `web_search` / `fetch_url` tool events emitted by web_agent.py. */
-function parseSearch(event: RunEvent): ParsedSearch | null {
-  if (event.agent_type !== "web_search" || event.stage !== "web_search") {
+export function parsePageActivity(event: RunEvent): PageActivity | null {
+  if (event.agent_type !== "web_search" && event.agent_type !== "browser") {
     return null;
   }
   const data = event.data ?? {};
   const query = typeof data.query === "string" ? data.query : null;
   const url = typeof data.url === "string" ? data.url : null;
+  const title = typeof data.title === "string" ? data.title : null;
   const depth = typeof data.depth === "string" ? data.depth : null;
+  const content = firstString(
+    data.content,
+    data.text,
+    data.page_content,
+    data.answer,
+  );
   const rawSources = Array.isArray(data.sources) ? data.sources : [];
   const sources: SearchSource[] = rawSources.flatMap((entry) => {
     if (typeof entry !== "object" || entry === null) return [];
     const record = entry as Record<string, unknown>;
     if (typeof record.url !== "string") return [];
-    return [{ url: record.url, title: typeof record.title === "string" ? record.title : null }];
+    return [{
+      url: record.url,
+      title: typeof record.title === "string" ? record.title : null,
+      text: firstString(record.text, record.snippet),
+    }];
   });
-  // Only treat it as a search preview if there's something to show beyond the
-  // message line StatusPreview already renders.
-  if (!query && !url && sources.length === 0) return null;
-  return { query, depth, url, sources };
+  if (!query && !url && !title && !content && sources.length === 0) return null;
+  return {
+    kind: query || sources.length > 0 ? "search" : "page",
+    query,
+    depth,
+    url,
+    title,
+    content,
+    sources,
+  };
 }
 
-function SearchPreview({ search }: { search: ParsedSearch }) {
+function firstString(...values: unknown[]): string | null {
+  const value = values.find((candidate) =>
+    typeof candidate === "string" && candidate.trim().length > 0
+  );
+  return typeof value === "string" ? value : null;
+}
+
+function PageActivityPreview({ page }: { page: PageActivity }) {
   return (
     <div className="search-preview">
       <div className="search-preview__query">
-        <Search size={16} />
+        {page.kind === "search" ? <Search size={16} /> : <Globe size={16} />}
         <div>
-          {search.query && <h3>{search.query}</h3>}
-          {search.url && !search.query && <h3>{search.url}</h3>}
-          {search.depth && <span className="search-preview__depth">{search.depth} search</span>}
+          <h3>{page.query ?? page.title ?? page.url ?? "Web page"}</h3>
+          {page.url && (
+            <a
+              className="search-preview__url"
+              href={page.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {page.url}
+            </a>
+          )}
+          {page.depth && (
+            <span className="search-preview__depth">{page.depth} search</span>
+          )}
         </div>
       </div>
-      {search.sources.length > 0 && (
+      {page.content && (
+        <div className="search-preview__content">
+          <MarkdownPreview content={page.content} />
+        </div>
+      )}
+      {page.sources.length > 0 && (
         <ul className="search-preview__sources">
-          {search.sources.map((source, index) => (
+          {page.sources.map((source, index) => (
             <li key={`${source.url}-${index}`}>
               <Globe size={12} />
-              <a href={source.url} target="_blank" rel="noreferrer">
-                {source.title ?? source.url}
-              </a>
+              <div>
+                <a href={source.url} target="_blank" rel="noreferrer">
+                  {source.title ?? source.url}
+                </a>
+                {source.text && <p>{source.text}</p>}
+              </div>
             </li>
           ))}
         </ul>

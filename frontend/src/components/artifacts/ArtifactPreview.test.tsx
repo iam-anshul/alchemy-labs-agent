@@ -34,6 +34,28 @@ function fileEvent(url: string | null): RunEvent {
   };
 }
 
+function webEvent(): RunEvent {
+  return {
+    ...fileEvent(null),
+    id: "web-1",
+    event: "agent_progress",
+    agent_type: "web_search",
+    stage: "fetching_page",
+    message: "Fetched page",
+    data: {
+      url: "https://example.com/report",
+      title: "Example report",
+      content: "## Key finding\n\nThe result is **verified**.",
+      sources: [{
+        url: "https://example.com/source",
+        title: "Primary source",
+        snippet: "Supporting evidence",
+      }],
+    },
+    artifacts: [],
+  };
+}
+
 describe("ArtifactPreview", () => {
   it("does not create a download link when the backend provides no URL", () => {
     render(<ArtifactPreview event={fileEvent(null)} />);
@@ -47,6 +69,18 @@ describe("ArtifactPreview", () => {
     expect(screen.getByRole("link", { name: /download/i })).toHaveAttribute(
       "href",
       "/artifacts/brief.docx",
+    );
+  });
+
+  it("renders fetched page content and source links in the live panel", () => {
+    render(<ArtifactPreview event={webEvent()} />);
+
+    expect(screen.getByRole("heading", { name: "Example report" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Key finding" })).toBeInTheDocument();
+    expect(screen.getByText("verified")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Primary source" })).toHaveAttribute(
+      "href",
+      "https://example.com/source",
     );
   });
 });

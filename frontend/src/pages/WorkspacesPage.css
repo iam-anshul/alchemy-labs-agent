@@ -42,6 +42,11 @@
   text-transform: uppercase;
 }
 
+.workspace-card__top time {
+  color: var(--color-ink-faint);
+  font: 0.64rem var(--font-mono);
+}
+
 .workspace-card__mark {
   display: grid;
   width: 34px;
@@ -79,6 +84,10 @@
 .workspace-card__stats svg {
   margin-left: auto;
   color: var(--color-ink-faint);
+}
+
+.workspace-card__stats b {
+  color: var(--color-ink);
 }
 
 .workspace-card--new {
