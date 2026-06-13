@@ -1,4 +1,4 @@
-import { Download, FileText, Image, Table2 } from "lucide-react";
+import { Download, FileText, Globe, Image, Search, Table2 } from "lucide-react";
 
 import type { Artifact, RunEvent } from "../../types/events";
 import { formatBytes } from "../../utils/format";
@@ -12,6 +12,7 @@ interface ArtifactPreviewProps {
 export default function ArtifactPreview({ event }: ArtifactPreviewProps) {
   const artifact = event?.artifacts[0] ?? null;
   const activity = event ? getActivityPresentation(event) : null;
+  const search = event ? parseSearch(event) : null;
 
   return (
     <section className="artifact-panel">
@@ -23,7 +24,8 @@ export default function ArtifactPreview({ event }: ArtifactPreviewProps) {
         <span>{artifact?.kind.replaceAll("_", " ") ?? "status"}</span>
       </header>
       <div className="artifact-panel__body">
-        {!artifact && <StatusPreview event={event} />}
+        {!artifact && search && <SearchPreview search={search} />}
+        {!artifact && !search && <StatusPreview event={event} />}
         {artifact && <ArtifactContent artifact={artifact} />}
       </div>
     </section>
@@ -98,6 +100,69 @@ export function getArtifactDownloadUrl(artifact: Artifact): string | null {
   } catch {
     return null;
   }
+}
+
+interface SearchSource {
+  url: string;
+  title: string | null;
+}
+
+interface ParsedSearch {
+  query: string | null;
+  depth: string | null;
+  url: string | null;
+  sources: SearchSource[];
+}
+
+/** Lift the web-search/fetch_url fields the backend puts on `event.data` into a
+ * typed shape, or null when this isn't a web-search event. Mirrors the
+ * `web_search` / `fetch_url` tool events emitted by web_agent.py. */
+function parseSearch(event: RunEvent): ParsedSearch | null {
+  if (event.agent_type !== "web_search" || event.stage !== "web_search") {
+    return null;
+  }
+  const data = event.data ?? {};
+  const query = typeof data.query === "string" ? data.query : null;
+  const url = typeof data.url === "string" ? data.url : null;
+  const depth = typeof data.depth === "string" ? data.depth : null;
+  const rawSources = Array.isArray(data.sources) ? data.sources : [];
+  const sources: SearchSource[] = rawSources.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const record = entry as Record<string, unknown>;
+    if (typeof record.url !== "string") return [];
+    return [{ url: record.url, title: typeof record.title === "string" ? record.title : null }];
+  });
+  // Only treat it as a search preview if there's something to show beyond the
+  // message line StatusPreview already renders.
+  if (!query && !url && sources.length === 0) return null;
+  return { query, depth, url, sources };
+}
+
+function SearchPreview({ search }: { search: ParsedSearch }) {
+  return (
+    <div className="search-preview">
+      <div className="search-preview__query">
+        <Search size={16} />
+        <div>
+          {search.query && <h3>{search.query}</h3>}
+          {search.url && !search.query && <h3>{search.url}</h3>}
+          {search.depth && <span className="search-preview__depth">{search.depth} search</span>}
+        </div>
+      </div>
+      {search.sources.length > 0 && (
+        <ul className="search-preview__sources">
+          {search.sources.map((source, index) => (
+            <li key={`${source.url}-${index}`}>
+              <Globe size={12} />
+              <a href={source.url} target="_blank" rel="noreferrer">
+                {source.title ?? source.url}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function StatusPreview({ event }: { event: RunEvent | null }) {

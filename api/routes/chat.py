@@ -1,4 +1,5 @@
 import os
+import base64
 import hashlib
 import traceback
 from pathlib import Path
@@ -53,6 +54,44 @@ _pending_input: dict[str, asyncio.Future] = {}
 def make_workspace(workspace_path):
     os.makedirs(workspace_path)
     return workspace_path
+
+
+def _read_artifacts(subdir: Path, produced: list[str], task_id: str) -> list[dict]:
+    """Read a completed task's produced files into persistable artifact dicts.
+    Each: {rel_path, content_b64, bytes, task_id}. Skips files that don't exist
+    (validation runs separately) and is binary-safe (base64)."""
+    artifacts: list[dict] = []
+    for rel in produced:
+        full = subdir / rel
+        if not full.is_file():
+            continue
+        raw = full.read_bytes()
+        artifacts.append({
+            "rel_path": rel,
+            "content_b64": base64.b64encode(raw).decode("ascii"),
+            "bytes": len(raw),
+            "task_id": task_id,
+        })
+    return artifacts
+
+
+def _restore_artifacts(subdir: Path, artifacts: list[dict]) -> list[str]:
+    """Materialize persisted artifacts into a run's subdir. Decodes base64 back
+    to bytes at each artifact's rel_path. Never overwrites a file the current
+    run already has. Returns the workspace-relative paths written."""
+    written: list[str] = []
+    for art in artifacts:
+        rel = art.get("rel_path")
+        content_b64 = art.get("content_b64")
+        if not rel or content_b64 is None:
+            continue
+        dest = subdir / rel
+        if dest.exists():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(base64.b64decode(content_b64))
+        written.append(rel)
+    return written
 
 def write_todo_atomic(run: QueryRun) -> None:
     todo_path = Path(run.workspace) / "todo.md"
@@ -661,6 +700,27 @@ async def create_chat(
         absolute_workspace_path_with_subdir = f"{absolute_workspace_path}/{workspace_sub_dir}"
         thisRun.workspace = absolute_workspace_path_with_subdir
         make_workspace(Path(absolute_workspace_path_with_subdir))
+
+        # Seed this run's outputs/ from the most recent prior run's produced
+        # files. Executors are sandboxed to this subdir, so a "continue the
+        # work" run otherwise can't see what an earlier run made; restoring the
+        # prior artifacts lets the new plan build on them by path. No-op when
+        # there is no prior run (a fresh workspace's first run).
+        with SessionLocal() as db:
+            prior_artifacts = db_utils.get_latest_prior_run_artifacts(
+                db, workspace_id=workspace_name, exclude_query_id=query_id
+            )
+        if prior_artifacts:
+            restored = _restore_artifacts(Path(absolute_workspace_path_with_subdir), prior_artifacts)
+            if restored:
+                await sink.publish_ui(
+                    "agent_progress",
+                    stage="resuming",
+                    status="progress",
+                    message=f"Restored {len(restored)} file(s) from the previous run",
+                    data={"restored": restored},
+                )
+
         # write todo
         write_todo_atomic(thisRun)
         await publish_todo_artifact(thisRun, sink, phase="planning")
@@ -708,6 +768,37 @@ async def create_chat(
 
             ready = []
             tasks_by_id = {t.id: t for t in thisRun.plan.tasks}
+
+            # Guard dangling deps: a task may reference a dep id that isn't in
+            # this plan (e.g. the planner reused a prior run's task id like "t1"
+            # for a "continue" request). Looking it up below would KeyError and
+            # crash the whole run. Fail such a task with a clear error instead,
+            # so the loop falls through to the replan path and the planner can
+            # rewrite it to use the restored prior-run files by path.
+            dangling = False
+            for task in thisRun.plan.tasks:
+                if task.status == "pending":
+                    missing = [dep for dep in task.deps if dep not in tasks_by_id]
+                    if missing:
+                        task.status = "failed"
+                        task.error = (
+                            f"task {task.id} depends on unknown task id(s) {missing} "
+                            "not present in this plan; if you meant files produced by a "
+                            "previous run, they have been restored into outputs/ — "
+                            "reference them by path with empty deps instead"
+                        )
+                        dangling = True
+            if dangling:
+                write_todo_atomic(thisRun)
+                if thisRun.replans_used < thisRun.replan_budget:
+                    new_plan = await planner(thisRun, sink)
+                    if _plan_signature(new_plan) != _plan_signature(thisRun.plan):
+                        thisRun.plan = _merge_plan(thisRun.plan, new_plan)
+                        thisRun.replans_used += 1
+                    write_todo_atomic(thisRun)
+                    await publish_todo_artifact(thisRun, sink, phase="replanning")
+                    continue
+                break
 
             for task in thisRun.plan.tasks:
                 if task.status == "pending":
@@ -895,6 +986,35 @@ async def create_chat(
                     task.status = "completed"
                     task.produced = result.produced
                     task.notes = result.notes
+
+                    # Persist this task's produced files to the DB immediately,
+                    # so a crash later in the run (e.g. the next task's network
+                    # dies) doesn't lose completed work — a subsequent "continue"
+                    # run can restore them. Best-effort: a persistence error must
+                    # not fail an otherwise-successful task.
+                    try:
+                        artifacts = _read_artifacts(
+                            Path(absolute_workspace_path_with_subdir), result.produced, task.id
+                        )
+                        if artifacts:
+                            with SessionLocal() as db:
+                                db_utils.append_run_artifacts(
+                                    db,
+                                    query_id=query_id,
+                                    workspace_id=workspace_name,
+                                    user_id=user_id,
+                                    artifacts=artifacts,
+                                    row_defaults={
+                                        "user_query": thisRun.user_query,
+                                        "goal": thisRun.goal,
+                                        "workspace": thisRun.workspace,
+                                        "started_at": thisRun.started_at,
+                                        "status": "running",
+                                        "query_counter": thisRun.query_counter,
+                                    },
+                                )
+                    except Exception as e:
+                        print(f"[{task.id}] failed to persist artifacts: {type(e).__name__}: {e}")
 
                 # We can add write_todo_atomic here so that user can see the changes as well, this can be done in future versions
 

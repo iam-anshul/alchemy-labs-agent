@@ -184,6 +184,13 @@ class QueryRun(Base): # this model name is needed to me renamed to QueryRun in t
     replans_used: Mapped[int] = mapped_column(Integer, server_default="0")
     replan_budget: Mapped[int] = mapped_column(Integer, server_default="3")
     todo_md: Mapped[str | None] = mapped_column(Text)
+    # Produced files of this run's completed tasks, persisted incrementally as
+    # each task finishes so they survive a mid-run crash. Each entry:
+    # {"rel_path": "outputs/t1.pdf", "content_b64": "...", "bytes": N,
+    #  "task_id": "t1"}. A "continue the work" run seeds its own outputs/ from
+    # the most recent prior run's artifacts (executors are sandboxed per-subdir
+    # and can't otherwise read an earlier run's files).
+    produced_artifacts: Mapped[list | None] = mapped_column(JSONB)
     workspace_id: Mapped[str] = mapped_column(
         String,
         ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),

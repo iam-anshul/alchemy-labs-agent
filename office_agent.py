@@ -82,7 +82,7 @@ def read_file(ctx: RunContext[OfficeDeps], path: str) -> str:
 
 
 @theOfficeAgent.tool(retries=1)
-def write_file(ctx: RunContext[OfficeDeps], path: str, content: str) -> str:
+async def write_file(ctx: RunContext[OfficeDeps], path: str, content: str) -> str:
     """Write text content to a workspace path (overwrites). Use for markdown,
     CSV, JSON, plain text, or python build scripts. For binary artifacts
     (xlsx, docx, pptx, png), generate them via run_command with a python
@@ -92,29 +92,28 @@ def write_file(ctx: RunContext[OfficeDeps], path: str, content: str) -> str:
         return resolved
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(content, encoding="utf-8")
-    try:
-        rel = str(resolved.relative_to(ctx.deps.workspace))
-        asyncio.create_task(
-            ctx.deps.sink.publish_ui(
-                "artifact_ready",
-                stage="writing_file",
-                status="progress",
-                message=f"Office agent wrote {resolved.name}",
-                artifacts=[
-                    file_artifact(
-                        kind="markdown" if resolved.suffix.lower() == ".md" else "file",
-                        path=rel,
-                        filename=resolved.name,
-                        type=resolved.suffix.lstrip(".").lower() or None,
-                        mime_type=mimetypes.guess_type(str(resolved))[0],
-                        bytes=resolved.stat().st_size,
-                        content=content if resolved.suffix.lower() in {".md", ".txt", ".csv", ".json"} else None,
-                    )
-                ],
+    # Awaited directly (not asyncio.create_task): pydantic-ai runs sync tools in
+    # a worker thread with no event loop, so create_task there raises and the
+    # event is silently dropped. An async tool runs on the loop, so the publish
+    # actually reaches subscribers.
+    rel = str(resolved.relative_to(ctx.deps.workspace))
+    await ctx.deps.sink.publish_ui(
+        "artifact_ready",
+        stage="writing_file",
+        status="progress",
+        message=f"Office agent wrote {resolved.name}",
+        artifacts=[
+            file_artifact(
+                kind="markdown" if resolved.suffix.lower() == ".md" else "file",
+                path=rel,
+                filename=resolved.name,
+                type=resolved.suffix.lstrip(".").lower() or None,
+                mime_type=mimetypes.guess_type(str(resolved))[0],
+                bytes=resolved.stat().st_size,
+                content=content if resolved.suffix.lower() in {".md", ".txt", ".csv", ".json"} else None,
             )
-        )
-    except RuntimeError:
-        pass
+        ],
+    )
     return f"Wrote {resolved.stat().st_size} bytes to {path}"
 
 

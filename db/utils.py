@@ -286,28 +286,104 @@ def register_query_run(
     db: Session, run: QueryRunModel, final_todo: str | None
 ) -> Exception | None:
     """Persist the finished run to the workspace_runs table. Returns None on
-    success, or the Exception on failure (the caller surfaces it as a 500)."""
+    success, or the Exception on failure (the caller surfaces it as a 500).
+
+    Upsert, not insert-only: a run row may already exist because artifacts were
+    persisted incrementally during the run (see append_run_artifacts). In that
+    case we update the existing row rather than inserting a duplicate PK. We
+    deliberately do NOT touch produced_artifacts here — those were written
+    incrementally and the end-of-run model doesn't carry them."""
     try:
-        thisQueryRun = QueryRun(
-            user_query=run.user_query,
-            goal=run.goal,
-            workspace=run.workspace,
-            started_at=run.started_at,
-            replans_used=run.replans_used,
-            replan_budget=run.replan_budget,
-            todo_md=final_todo,
-            workspace_id=run.workspace_id,
-            query_id=run.query_id,
-            user_id=run.user_id,
-            status=run.status,
-            query_counter=run.query_counter
-        )
-        db.add(thisQueryRun)
+        existing = db.get(QueryRun, run.query_id)
+        if existing is not None:
+            existing.user_query = run.user_query
+            existing.goal = run.goal
+            existing.workspace = run.workspace
+            existing.started_at = run.started_at
+            existing.replans_used = run.replans_used
+            existing.replan_budget = run.replan_budget
+            existing.todo_md = final_todo
+            existing.workspace_id = run.workspace_id
+            existing.user_id = run.user_id
+            existing.status = run.status
+            existing.query_counter = run.query_counter
+        else:
+            db.add(QueryRun(
+                user_query=run.user_query,
+                goal=run.goal,
+                workspace=run.workspace,
+                started_at=run.started_at,
+                replans_used=run.replans_used,
+                replan_budget=run.replan_budget,
+                todo_md=final_todo,
+                workspace_id=run.workspace_id,
+                query_id=run.query_id,
+                user_id=run.user_id,
+                status=run.status,
+                query_counter=run.query_counter,
+            ))
         db.commit()
-        db.refresh(thisQueryRun)
     except Exception as e:
         return e
     return None
+
+
+def append_run_artifacts(
+    db: Session,
+    *,
+    query_id: UUID,
+    workspace_id: str,
+    user_id: UUID,
+    artifacts: list[dict],
+    row_defaults: dict[str, Any],
+) -> None:
+    """Append produced-file artifacts to a run row, creating the row if needed.
+
+    Called as each task completes so produced files are durable mid-run (they
+    survive a crash before the end-of-run register_query_run). `artifacts` is a
+    list of {rel_path, content_b64, bytes, task_id}; entries are appended to the
+    existing produced_artifacts array, de-duplicated by rel_path (a re-run of a
+    task overwrites its earlier entry). `row_defaults` supplies the NOT NULL
+    columns (user_query, goal, workspace, started_at, status, query_counter)
+    needed when the row is first created here, before register_query_run runs."""
+    run = db.get(QueryRun, query_id)
+    if run is None:
+        run = QueryRun(
+            query_id=query_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            produced_artifacts=[],
+            **row_defaults,
+        )
+        db.add(run)
+
+    existing = list(run.produced_artifacts or [])
+    by_path = {a["rel_path"]: a for a in existing}
+    for art in artifacts:
+        by_path[art["rel_path"]] = art
+    # Reassign (not in-place mutate) so SQLAlchemy detects the JSONB change.
+    run.produced_artifacts = list(by_path.values())
+    db.commit()
+
+
+def get_latest_prior_run_artifacts(
+    db: Session, workspace_id: str, exclude_query_id: UUID
+) -> list[dict]:
+    """Return the produced_artifacts of the most recent prior run in this
+    workspace, excluding the current run. Empty list if there is no prior run
+    or it produced nothing. Used to seed a continuation run's workspace."""
+    row = db.scalars(
+        select(QueryRun)
+        .where(
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.query_id != exclude_query_id,
+        )
+        .order_by(desc(QueryRun.started_at))
+        .limit(1)
+    ).first()
+    if row is None or not row.produced_artifacts:
+        return []
+    return list(row.produced_artifacts)
 
 
 # delete a workspace and everything scoped to it

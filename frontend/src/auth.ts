@@ -9,7 +9,7 @@ SuperTokens.init({
     apiDomain: window.location.origin,
     websiteDomain: window.location.origin,
     apiBasePath: "/auth",
-    websiteBasePath: "/auth",
+    websiteBasePath: "/auth-ui",
   },
   recipeList: [EmailPassword.init(), Session.init()],
 });

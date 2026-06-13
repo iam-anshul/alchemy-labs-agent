@@ -89,7 +89,7 @@ def _resolve_inside(workspace: Path, path: str) -> Path | str:
     return absolute_path
 
 @theWebAgent.tool(retries=1)
-def submit(ctx: RunContext[WebDeps], produced: list[str], notes: str) -> str:
+async def submit(ctx: RunContext[WebDeps], produced: list[str], notes: str) -> str:
     """Submit the final result. Call exactly once, after all expected files
     are written. Validates each produced path exists in the workspace and is
     non-empty before accepting."""
@@ -110,11 +110,37 @@ def submit(ctx: RunContext[WebDeps], produced: list[str], notes: str) -> str:
         normalized.append(str(p))
 
     ctx.deps.submitted = ExecutorResult(produced=normalized, notes=notes)
+
+    # Emit the final set of produced files to the event log as artifacts, so the
+    # UI gets one consolidated "here is what this agent made" event in addition
+    # to the per-file artifact_ready events from write_file.
+    artifacts = []
+    for rel in normalized:
+        full = workspace / rel
+        artifacts.append(
+            file_artifact(
+                kind="markdown" if Path(rel).suffix.lower() == ".md" else "file",
+                path=rel,
+                filename=Path(rel).name,
+                type=Path(rel).suffix.lstrip(".").lower() or None,
+                mime_type=mimetypes.guess_type(str(full))[0],
+                bytes=full.stat().st_size,
+            )
+        )
+    await ctx.deps.sink.publish_ui(
+        "artifact_ready",
+        stage="web_search",
+        status="progress",
+        message=f"Web search agent produced {len(normalized)} file(s)",
+        data={"produced": normalized, "notes": notes},
+        artifacts=artifacts,
+    )
+
     return "Result submitted successfully. You may stop."
 
 
 @theWebAgent.tool(retries=1)
-def write_file(ctx: RunContext[WebDeps], path: str, content: str) -> str:
+async def write_file(ctx: RunContext[WebDeps], path: str, content: str) -> str:
     """Write text content to a workspace path (overwrites). Use for markdown,
     CSV, JSON, plain text, or python build scripts. For binary artifacts
     (xlsx, docx, pptx, png), generate them via run_command with a python
@@ -124,29 +150,24 @@ def write_file(ctx: RunContext[WebDeps], path: str, content: str) -> str:
         return resolved
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(content, encoding="utf-8")
-    try:
-        rel = str(resolved.relative_to(ctx.deps.workspace))
-        asyncio.create_task(
-            ctx.deps.sink.publish_ui(
-                "artifact_ready",
-                stage="writing_file",
-                status="progress",
-                message=f"Web Search agent wrote {resolved.name}",
-                artifacts=[
-                    file_artifact(
-                        kind="markdown" if resolved.suffix.lower() == ".md" else "file",
-                        path=rel,
-                        filename=resolved.name,
-                        type=resolved.suffix.lstrip(".").lower() or None,
-                        mime_type=mimetypes.guess_type(str(resolved))[0],
-                        bytes=resolved.stat().st_size,
-                        content=content if resolved.suffix.lower() in {".md", ".txt", ".csv", ".json"} else None,
-                    )
-                ],
+    rel = str(resolved.relative_to(ctx.deps.workspace))
+    await ctx.deps.sink.publish_ui(
+        "artifact_ready",
+        stage="writing_file",
+        status="progress",
+        message=f"Web Search agent wrote {resolved.name}",
+        artifacts=[
+            file_artifact(
+                kind="markdown" if resolved.suffix.lower() == ".md" else "file",
+                path=rel,
+                filename=resolved.name,
+                type=resolved.suffix.lstrip(".").lower() or None,
+                mime_type=mimetypes.guess_type(str(resolved))[0],
+                bytes=resolved.stat().st_size,
+                content=content if resolved.suffix.lower() in {".md", ".txt", ".csv", ".json"} else None,
             )
-        )
-    except RuntimeError:
-        pass
+        ],
+    )
     return f"Wrote {resolved.stat().st_size} bytes to {path}"
 
 @theWebAgent.tool(retries=1)
@@ -164,8 +185,8 @@ def read_file(ctx: RunContext[WebDeps], path: str) -> str:
         return f"ERROR: file {path} is not text; read it via a python script with run_command instead"
 
 
-@theWebAgent.tool_plain(retries=3)
-def web_search(query: str, depth: Literal["standard", "deep"]):
+@theWebAgent.tool(retries=3)
+async def web_search(ctx: RunContext[WebDeps], query: str, depth: Literal["standard", "deep"]):
     """Search the live web and get back a sourced answer.
 
     Use this as your primary way to find information, look up current facts or
@@ -189,17 +210,38 @@ def web_search(query: str, depth: Literal["standard", "deep"]):
             default.
     """
     model = "exa-pro" if depth == "deep" else "exa"
-    response = exa_client.answer(query, text=True, model=model)
+    # The Exa SDK is blocking; run it off the event loop so the agent loop (and
+    # the event publish below) isn't stalled.
+    response = await asyncio.to_thread(exa_client.answer, query, text=True, model=model)
+    citations = [
+        {"url": c.url, "title": c.title, "text": c.text}
+        for c in response.citations
+    ]
+    # Surface the search to the event log so the UI can show what the agent
+    # looked up and which sources it found — mirrors how write_file emits an
+    # artifact_ready event. Awaited directly (not create_task) because this tool
+    # runs on the event loop; create_task from a worker thread would have raised
+    # "no running event loop" and been silently dropped.
+    await ctx.deps.sink.publish_ui(
+        "agent_progress",
+        stage="web_search",
+        status="progress",
+        message=f"Searched the web: {query}",
+        data={
+            "query": query,
+            "depth": depth,
+            "sources": [
+                {"url": c["url"], "title": c["title"]} for c in citations
+            ],
+        },
+    )
     return {
         "answer": response.answer,
-        "citations": [
-            {"url": c.url, "title": c.title, "text": c.text}
-            for c in response.citations
-        ],
+        "citations": citations,
     }
 
-@theWebAgent.tool_plain(retries=3)
-def fetch_url(url: str):
+@theWebAgent.tool(retries=3)
+async def fetch_url(ctx: RunContext[WebDeps], url: str):
     """Fetch a single web page and return its full text contents.
 
     Use this when you already have a specific URL — typically one surfaced in
@@ -213,7 +255,16 @@ def fetch_url(url: str):
             (e.g. "https://example.com/report"). Relative URLs or bare domains
             will not work.
     """
-    response = exa_client.get_contents([url], text=True, livecrawl="always")
+    await ctx.deps.sink.publish_ui(
+        "agent_progress",
+        stage="web_search",
+        status="progress",
+        message=f"Fetched page: {url}",
+        data={"url": url},
+    )
+    response = await asyncio.to_thread(
+        exa_client.get_contents, [url], text=True, livecrawl="always"
+    )
     if not response.results:
         return f"ERROR: no content retrieved for {url}"
     return response.results[0].text
