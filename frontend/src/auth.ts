@@ -5,7 +5,7 @@ import Session from "supertokens-auth-react/recipe/session";
 
 SuperTokens.init({
   appInfo: {
-    appName: "Serca",
+    appName: "Alchemy Labs",
     apiDomain: window.location.origin,
     websiteDomain: window.location.origin,
     apiBasePath: "/auth",

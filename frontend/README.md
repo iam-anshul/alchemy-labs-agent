@@ -1,6 +1,6 @@
-# Serca Frontend
+# Alchemy Labs Frontend
 
-This directory contains the standalone Serca web application.
+This directory contains the standalone Alchemy Labs web application.
 
 The frontend is intentionally a small client-rendered application. It talks to
 the existing FastAPI server for authentication, data, files, agent execution,
@@ -104,7 +104,7 @@ Open these links:
 
 | Service | URL |
 | --- | --- |
-| Serca frontend | [http://localhost:5173](http://localhost:5173) |
+| Alchemy Labs frontend | [http://localhost:5173](http://localhost:5173) |
 | Backend health | [http://localhost:8000/health](http://localhost:8000/health) |
 | Protected API docs | [http://localhost:8000/docs](http://localhost:8000/docs) |
 | SuperTokens health | [http://localhost:3567/hello](http://localhost:3567/hello) |

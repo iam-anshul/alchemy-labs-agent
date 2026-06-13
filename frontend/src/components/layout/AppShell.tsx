@@ -32,9 +32,9 @@ export default function AppShell({
     <div className="app-shell">
       <header className="top-bar">
         <div className="top-bar__identity">
-          <Link className="brand" to="/workspaces" aria-label="Serca workspaces">
+          <Link className="brand" to="/workspaces" aria-label="Alchemy Labs workspaces">
             <span className="brand__mark" aria-hidden="true" />
-            <span>serca</span>
+            <span>alchemy labs</span>
           </Link>
           <nav className="breadcrumbs" aria-label="Breadcrumb">
             {crumbs.map((crumb, index) => (

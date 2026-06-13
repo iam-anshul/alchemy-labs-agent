@@ -88,7 +88,7 @@ export default function WorkspacePage() {
       </header>
 
       <section className="run-composer" aria-labelledby="run-composer-title">
-        <label id="run-composer-title" htmlFor="run-query">What should Serca do?</label>
+        <label id="run-composer-title" htmlFor="run-query">What should Alchemy Labs do?</label>
         <textarea
           id="run-query"
           rows={4}

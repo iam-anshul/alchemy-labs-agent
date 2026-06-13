@@ -15,7 +15,7 @@ const WorkspacesPage = lazy(() => import("./pages/WorkspacesPage"));
 function ProductRoutes() {
   return (
     <SessionAuth>
-      <Suspense fallback={<div className="route-loading">Loading Serca...</div>}>
+      <Suspense fallback={<div className="route-loading">Loading Alchemy Labs...</div>}>
         <Routes>
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route
