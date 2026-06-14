@@ -33,7 +33,11 @@ class TaskSpec(BaseModel):
 
 class PlanOutput(BaseModel):
     goal: str = Field(default="", description="The distilled intent the planner reasons about. This is what the planner tries to achieve through its tasks.")
-    tasks: list[TaskSpec]
+    # min_length=1: a plan with zero tasks is never valid. Without this, the
+    # model can occasionally emit tasks=[] (especially when regenerating the
+    # plan on a replan), which would render an empty todo.md. Requiring at least
+    # one task makes pydantic-ai reject an empty plan and re-prompt the model.
+    tasks: list[TaskSpec] = Field(min_length=1)
     needs_user_feedback: bool = Field(default=False, description="Populate this field with 'True' when you need to ask the user for clarification or a feedback or just want their confirmation on something. This basically is for human in the loop so 'True' if you want it else 'False'")
     feedback_question: str | None = Field(default=None, description="This is to be used only when 'needs_user_feedback is 'True' and this field is for you to ask the query, clarification, feedback or confirmation to the user. If 'needs_user_feedback' is 'False' this will be 'None'.")
 
@@ -41,6 +45,21 @@ class PlanOutput(BaseModel):
         default=None,
         description="Optional free-form notes the planner appends when replanning, explaining what changed and why." \
         "Notes is the planner's scratchpad. It's free-form text the planner writes to itself across calls, explaining decisions."
+    )
+
+
+class ReplanDecision(BaseModel):
+    """Output of a REPLAN call. The planner first decides whether the in-flight
+    plan needs revision at all; only when it does must it emit a full revised
+    plan. This means the common 'no change needed' case requires emitting just
+    `needs_change=false` — the planner never regenerates (and so can never
+    accidentally drop) the task list on a no-op replan."""
+    needs_change: bool = Field(
+        description="True only if the in-flight plan must be revised in light of executor results/notes. False to leave the plan exactly as-is (the common case)."
+    )
+    revised_plan: PlanOutput | None = Field(
+        default=None,
+        description="The COMPLETE revised plan (all tasks, not a delta). REQUIRED when needs_change is True; leave null when needs_change is False.",
     )
 
 class QueryRun(BaseModel): # the name should be changed to QueryRun in the upcoming version

@@ -3,7 +3,7 @@ import base64
 import hashlib
 import traceback
 from pathlib import Path
-from orchestrator import plannerAgent, PlannerDeps
+from orchestrator import plannerAgent, replanAgent, PlannerDeps
 from browser_agent import BrowserExecutor, ExecutorResult
 from agent_schemas import QueryAnswer
 from report_schemas import ReportResult
@@ -99,30 +99,6 @@ def write_todo_atomic(run: QueryRun) -> None:
     tmp.write_text(render_todo(run), encoding="utf-8")
     tmp.replace(todo_path)
 
-def _plan_signature(plan: PlanOutput) -> tuple:
-    """Comparison signature covering only the planner-owned fields of a plan.
-
-    Used to detect meaningful changes (new/removed tasks, edited queries,
-    revised deps, etc.) while ignoring control-loop-owned state (status,
-    produced). Without this, status flips would always read as 'plan
-    changed' and burn the replan budget on no-op revisions.
-    """
-    return (
-        tuple(
-            (
-                t.id,
-                t.title,
-                t.agent,
-                t.doc_deps,
-                tuple(getattr(d, "id", d) for d in t.deps),
-                t.query,
-                t.expects,
-            )
-            for t in plan.tasks
-        ),
-        plan.notes,
-    )
-
 def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
     """Adopt a revised plan while preserving control-loop-owned state.
 
@@ -186,18 +162,20 @@ def _build_message_history_from_prior_runs(workspace_id: str, current_run_id: st
         messages.append(ModelResponse(parts=[TextPart(content=r.todo_md)]))
     return messages
 
-async def planner(run: QueryRun, sink: EventSink) -> PlanOutput:
+async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
     """Run the planner LLM.
 
     Initial call (no plan on the run yet): generate the plan from the user's
-    goal alone. If this run is part of a persistent workspace, prior runs'
-    todo.mds are reconstructed as message_history so the planner sees the
-    conversation timeline.
+    goal alone, and return it (always a PlanOutput with >=1 task). If this run
+    is part of a persistent workspace, prior runs' todo.mds are reconstructed as
+    message_history so the planner sees the conversation timeline.
 
-    Subsequent calls (replan): render the current todo.md and pass it to the
-    agent so it can review executor results and either return the plan
-    unchanged or a revised version. NO history injection — replans are
-    scoped to the in-flight run only, per design.
+    Subsequent calls (replan): render the current todo.md and ask the replan
+    agent whether the plan needs revision. It returns a ReplanDecision; we
+    return the COMPLETE revised plan when needs_change is True, or None when the
+    plan should stay as-is (the common case). Returning None means the caller
+    leaves run.plan untouched and does not spend replan budget. NO history
+    injection — replans are scoped to the in-flight run only, per design.
     """
 
     if not run.plan:
@@ -254,8 +232,14 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput:
         message="Checking whether the plan needs updates",
         data={"phase": "replan", "replans_used": run.replans_used, "replan_budget": run.replan_budget},
     )
-    planner_run = await plannerAgent.run(user_prompt=replan_prompt, deps=PlannerDeps(workspace_name=run.workspace_id))
-    return planner_run.output
+    replan_run = await replanAgent.run(user_prompt=replan_prompt, deps=PlannerDeps(workspace_name=run.workspace_id))
+    decision = replan_run.output
+    # No change wanted, or the model said "change" but gave no plan -> treat as
+    # no-op (don't adopt anything, don't spend budget). Only a genuine revised
+    # plan is returned.
+    if not decision.needs_change or decision.revised_plan is None:
+        return None
+    return decision.revised_plan
 
 async def publish_todo_artifact(run: QueryRun, sink: EventSink, *, phase: str) -> None:
     todo_path = Path(run.workspace) / "todo.md"
@@ -792,7 +776,7 @@ async def create_chat(
                 write_todo_atomic(thisRun)
                 if thisRun.replans_used < thisRun.replan_budget:
                     new_plan = await planner(thisRun, sink)
-                    if _plan_signature(new_plan) != _plan_signature(thisRun.plan):
+                    if new_plan is not None:
                         thisRun.plan = _merge_plan(thisRun.plan, new_plan)
                         thisRun.replans_used += 1
                     write_todo_atomic(thisRun)
@@ -1025,7 +1009,7 @@ async def create_chat(
                 # whether to revise.
                 if thisRun.replans_used < thisRun.replan_budget:
                     new_plan = await planner(thisRun, sink)
-                    if _plan_signature(new_plan) != _plan_signature(thisRun.plan):
+                    if new_plan is not None:
                         thisRun.plan = _merge_plan(thisRun.plan, new_plan)
                         thisRun.replans_used += 1
 
