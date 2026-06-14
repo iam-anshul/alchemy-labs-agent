@@ -1,3 +1,7 @@
+# Import first so Logfire is configured and pydantic-ai is instrumented before
+# any agent modules (imported transitively via the routers) are loaded.
+import observability  # noqa: F401
+
 from fastapi import FastAPI
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.openapi.utils import get_openapi
@@ -123,6 +127,10 @@ init(
     recipe_list=[session.init(), emailpassword.init()],
     mode="asgi"
 )
+
+# Trace incoming requests so each agent run is nested under the API call that
+# triggered it. No-op if Logfire wasn't configured (no token).
+observability.instrument_fastapi_app(server)
 
 server.add_middleware(get_middleware())
 server.add_middleware(
