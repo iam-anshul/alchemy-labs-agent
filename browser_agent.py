@@ -205,6 +205,11 @@ class ExecutorResult(BaseModel):
     error: str | None = None
 
 
+class BrowserSubmission(BaseModel):
+    produced: list[str]
+    notes: str
+
+
 class BrowserExecutor:
     """wraps browser_use Agent for use as a sub-agent in the planner system"""
 
@@ -224,9 +229,6 @@ class BrowserExecutor:
         self.use_cloud = use_cloud
         self.max_failures = max_failures
 
-        # Mutable state captured by the submit tool
-        self._submitted: ExecutorResult | None = None
-
     async def run(
         self,
         query: str,
@@ -236,7 +238,6 @@ class BrowserExecutor:
         task_id: str | None = None,
         attempt: int | None = None,
     ) -> ExecutorResult:
-        self._submitted = None
         sink = sink.child(task_id=task_id, agent_type="browser", attempt=attempt)
 
         task_prompt = self._build_task_prompt(query, expects, dep_files)
@@ -309,18 +310,28 @@ class BrowserExecutor:
                 error=f"Agent loop failed: {type(e).__name__}: {e}",
             )
         finally:
-            await self._emit_new_outputs(sink, before_outputs)
             await browser.kill()
 
-        if self._submitted is None:
-            # The agent ended (called done, exhausted steps, or stopped) without
-            # calling our submit tool. Surface its OWN final result and errors so
-            # the planner can see WHY it failed and reroute on replan, instead of
-            # a generic "no submit" string.
+        try:
+            final = history.final_result() if history is not None else None
+            if not final:
+                raise ValueError("browser agent produced no structured final result")
+            submission = (
+                BrowserSubmission.model_validate_json(final)
+                if isinstance(final, str)
+                else BrowserSubmission.model_validate(final)
+            )
+            result = self._validate_submission(submission)
+            if result.error:
+                raise ValueError(result.error)
+        except Exception as e:
+            detail = self._failure_detail(history)
+            if str(e) and str(e) not in detail:
+                detail = f"{detail} Validation: {e}"
             result = ExecutorResult(
                 produced=[],
                 notes="",
-                error=self._failure_detail(history),
+                error=detail,
             )
             await sink.publish_ui(
                 "agent_ended",
@@ -330,14 +341,44 @@ class BrowserExecutor:
                 data={"error": result.error},
             )
             return result
+        await self._emit_new_outputs(sink, before_outputs)
         await sink.publish_ui(
             "agent_ended",
             stage="browsing",
             status="completed",
             message="Browser agent completed",
-            data={"produced": self._submitted.produced, "notes": self._submitted.notes},
+            data={"produced": result.produced, "notes": result.notes},
         )
-        return self._submitted
+        return result
+
+    def _validate_submission(self, submission: BrowserSubmission) -> ExecutorResult:
+        normalized = []
+        for path in submission.produced:
+            produced_path = Path(path)
+            if produced_path.is_absolute():
+                try:
+                    produced_path = produced_path.relative_to(self.workspace)
+                except ValueError:
+                    return ExecutorResult(
+                        produced=[],
+                        notes="",
+                        error=f"path {path} is outside workspace; use relative paths",
+                    )
+            absolute_path = self.workspace / produced_path
+            if not absolute_path.exists():
+                return ExecutorResult(
+                    produced=[],
+                    notes="",
+                    error=f"claimed file {path} does not exist",
+                )
+            if absolute_path.stat().st_size == 0:
+                return ExecutorResult(
+                    produced=[],
+                    notes="",
+                    error=f"claimed file {path} is empty",
+                )
+            normalized.append(str(produced_path))
+        return ExecutorResult(produced=normalized, notes=submission.notes)
 
     def _snapshot_outputs(self) -> set[str]:
         outputs = self.workspace / "outputs"
@@ -500,7 +541,7 @@ class BrowserExecutor:
         history. The agent's final_result() holds its own account of what
         happened (e.g. 'screener.in search unresponsive, no alternatives tried'),
         which is exactly what the planner needs to make an informed rewrite."""
-        base = "Agent ended without calling submit."
+        base = "Agent ended without a valid structured output."
         if history is None:
             return base
         parts = [base]
@@ -560,16 +601,16 @@ blocked, and put the reason in your submit notes (e.g. "Google hit a reCAPTCHA;
 retrieved figures from screener.in instead" or "all sources blocked, no data").
 
 WHEN DONE:
-Call the submit tool with:
+Call the terminal `done` action with its structured output:
   - produced: list of relative paths you wrote
   - notes: 1-2 sentences flagging anything the planner should know
     (judgment calls, data limitations, surprises). Empty string if nothing.
 
-Do not call submit until you have written all expected files.
+Do not finish until you have written all expected files.
 """
 
     def _build_tools(self, sink: EventSink = EventSink()) -> Tools:
-        tools = Tools()
+        tools = Tools(output_model=BrowserSubmission)
         workspace = self.workspace
 
         def emit_artifact(stage: str, message: str, artifact: dict[str, Any]) -> None:
@@ -631,29 +672,5 @@ Do not call submit until you have written all expected files.
                 ),
             )
             return f"Wrote {absolute_path.stat().st_size} bytes to {path}"
-
-        @tools.action(
-            description=(
-                "Submit your final result. Call this exactly once, after all expected files have been written. Ends your turn."
-            )
-        )
-        def submit(produced: list[str], notes: str) -> str:
-            normalized = []
-            for path in produced:
-                path_produced = Path(path)
-                if path_produced.is_absolute():
-                    try:
-                        path_produced = path_produced.relative_to(workspace)
-                    except ValueError:
-                        return f"ERROR: path {path} is outside workspace; use relative paths"
-                absolute_path = workspace / path_produced
-                if not absolute_path.exists():
-                    return f"ERROR: claimed file {path} does not exist"
-                if absolute_path.stat().st_size == 0:
-                    return f"ERROR: claimed file {path} is empty"
-                normalized.append(str(path_produced))
-
-            self._submitted = ExecutorResult(produced=normalized, notes=notes)
-            return "Result submitted successfully you may stop."
 
         return tools

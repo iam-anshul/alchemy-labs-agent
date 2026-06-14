@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, ToolOutput
 from formats_pydantic import PlanOutput, ReplanDecision
 from system_prompts import planner_system_prompt
 from pydantic_ai.models.openai import OpenAIChatModelSettings
@@ -28,7 +28,7 @@ plannerAgent = Agent(
     system_prompt=planner_system_prompt,
     retries=3,
     deps_type=PlannerDeps,
-    output_type=PlanOutput,
+    output_type=ToolOutput(PlanOutput, name="submit_plan"),
     model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
 )
 
@@ -43,7 +43,7 @@ replanAgent = Agent(
     system_prompt=planner_system_prompt,
     retries=3,
     deps_type=PlannerDeps,
-    output_type=ReplanDecision,
+    output_type=ToolOutput(ReplanDecision, name="submit_replan_decision"),
     model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
 )
 

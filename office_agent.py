@@ -9,7 +9,8 @@ from pathlib import Path
 
 from api.events import EventSink, file_artifact
 from dotenv import load_dotenv
-from pydantic_ai import Agent, RunContext
+from pydantic import BaseModel
+from pydantic_ai import Agent, ModelRetry, RunContext, ToolOutput
 from pydantic_ai.models.openai import OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 from qwen_compat import QwenChatModel
@@ -34,21 +35,30 @@ class OfficeDeps:
     """Per-run state passed into the office agent via RunContext.
 
     workspace is the absolute root the tools resolve relative paths against;
-    the LLM never sees it. submitted is the mutable holder the submit tool
-    writes into so the caller can recover the ExecutorResult after the agent
-    loop ends — pydantic-ai gives no other channel to lift state out of a
-    tool call.
+    the LLM never sees it.
     """
     workspace: Path
     sink: EventSink = field(default_factory=EventSink)
-    submitted: ExecutorResult | None = None
+
+
+class OfficeSubmission(BaseModel):
+    produced: list[str]
+    notes: str
 
 
 model = QwenChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
 
-theOfficeAgent = Agent[OfficeDeps, str](
+theOfficeAgent = Agent[OfficeDeps, OfficeSubmission](
     model,
     deps_type=OfficeDeps,
+    output_type=ToolOutput(
+        OfficeSubmission,
+        name="submit",
+        description=(
+            "Finish the office task with the relative paths actually written "
+            "and brief notes for the planner."
+        ),
+    ),
     system_prompt=office_system_prompt,
     retries=3,
     model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
@@ -175,29 +185,85 @@ def officecli(ctx: RunContext[OfficeDeps], args: list[str]) -> str:
         return stdout
 
 
-@theOfficeAgent.tool(retries=1)
-def submit(ctx: RunContext[OfficeDeps], produced: list[str], notes: str) -> str:
-    """Submit the final result. Call exactly once, after all expected files
-    are written. Validates each produced path exists in the workspace and is
-    non-empty before accepting."""
-    workspace = ctx.deps.workspace
+def _validate_submission(
+    workspace: Path,
+    submission: OfficeSubmission,
+) -> ExecutorResult:
     normalized = []
-    for path in produced:
+    for path in submission.produced:
         p = Path(path)
         if p.is_absolute():
             try:
                 p = p.relative_to(workspace)
             except ValueError:
-                return f"ERROR: path {path} is outside workspace; use relative paths"
+                return ExecutorResult(
+                    produced=[],
+                    notes="",
+                    error=f"path {path} is outside workspace; use relative paths",
+                )
         absolute_path = workspace / p
         if not absolute_path.exists():
-            return f"ERROR: claimed file {path} does not exist"
+            return ExecutorResult(
+                produced=[],
+                notes="",
+                error=f"claimed file {path} does not exist",
+            )
         if absolute_path.stat().st_size == 0:
-            return f"ERROR: claimed file {path} is empty"
+            return ExecutorResult(
+                produced=[],
+                notes="",
+                error=f"claimed file {path} is empty",
+            )
         normalized.append(str(p))
 
-    ctx.deps.submitted = ExecutorResult(produced=normalized, notes=notes)
-    return "Result submitted successfully. You may stop."
+    return ExecutorResult(produced=normalized, notes=submission.notes)
+
+
+async def _publish_submission(
+    deps: OfficeDeps,
+    submission: OfficeSubmission,
+) -> None:
+    """Publish the validated final artifact set exactly once."""
+    artifacts = []
+    for rel in submission.produced:
+        full = deps.workspace / rel
+        suffix = full.suffix.lower()
+        content = None
+        if suffix in {".md", ".txt", ".csv", ".json"}:
+            try:
+                content = full.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                content = None
+        artifacts.append(
+            file_artifact(
+                kind="markdown" if suffix == ".md" else "file",
+                path=rel,
+                filename=full.name,
+                type=suffix.lstrip(".") or None,
+                mime_type=mimetypes.guess_type(str(full))[0],
+                bytes=full.stat().st_size,
+                content=content,
+            )
+        )
+    await deps.sink.publish_ui(
+        "artifact_ready",
+        stage="office",
+        status="progress",
+        message=f"Office agent produced {len(submission.produced)} file(s)",
+        data={"produced": submission.produced, "notes": submission.notes},
+        artifacts=artifacts,
+    )
+
+
+@theOfficeAgent.output_validator
+def validate_office_submission(
+    ctx: RunContext[OfficeDeps],
+    submission: OfficeSubmission,
+) -> OfficeSubmission:
+    result = _validate_submission(ctx.deps.workspace, submission)
+    if result.error:
+        raise ModelRetry(result.error)
+    return OfficeSubmission(produced=result.produced, notes=result.notes)
 
 
 def _build_task_prompt(query: str, expects: str, dep_files: list[str]) -> str:
@@ -226,14 +292,14 @@ contract. `run_command` + python is reserved for pandas analysis, matplotlib
 charts, and CSV/JSON wrangling that officecli cannot do.
 
 WHEN DONE:
-Call the submit tool with:
+Return the terminal `submit` output with:
   - produced: list of relative paths you wrote
   - notes: 1-2 sentences flagging anything the planner should know
     (judgment calls, data limitations, surprises). Empty string if nothing.
     Do NOT recap what you did and do NOT claim to have used a tool you did
     not actually call — the planner can see the produced files.
 
-Do not call submit until you have written all expected files.
+Do not submit until you have written all expected files.
 """
 
 
@@ -245,14 +311,14 @@ async def run_office_executor(
     sink: EventSink = EventSink(),
 ) -> ExecutorResult:
     """Pattern-B entrypoint: build per-run deps, run the module-level agent,
-    return the result captured by the submit tool.
+    return the agent's validated structured output.
 
     Plugs into dispatch_executor_agent in main.py for the 'office' branch."""
     deps = OfficeDeps(workspace=workspace.resolve(), sink=sink.child(agent_type="office"))
     task_prompt = _build_task_prompt(query, expects, dep_files)
 
     try:
-        await theOfficeAgent.run(user_prompt=task_prompt, deps=deps)
+        run_result = await theOfficeAgent.run(user_prompt=task_prompt, deps=deps)
     except Exception as e:
         return ExecutorResult(
             produced=[],
@@ -260,10 +326,6 @@ async def run_office_executor(
             error=f"Agent loop failed: {type(e).__name__}: {e}",
         )
 
-    if deps.submitted is None:
-        return ExecutorResult(
-            produced=[],
-            notes="",
-            error="Agent finished without calling submit",
-        )
-    return deps.submitted
+    submission = run_result.output
+    await _publish_submission(deps, submission)
+    return ExecutorResult(produced=submission.produced, notes=submission.notes)

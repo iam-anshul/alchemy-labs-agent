@@ -1,4 +1,5 @@
-from pydantic_ai import Agent, RunContext
+from pydantic import BaseModel
+from pydantic_ai import Agent, ModelRetry, RunContext, ToolOutput
 from pydantic_ai.models.openai import OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 from qwen_compat import QwenChatModel
@@ -31,18 +32,30 @@ class WebDeps:
     workspace: Path
     sink: EventSink = field(default_factory=EventSink)
     page_cache: dict[str, "CachedPage"] = field(default_factory=dict)
-    submitted: ExecutorResult | None = None
 
 @dataclass
 class CachedPage:
     url: str
     content: str
 
+class WebSubmission(BaseModel):
+    produced: list[str]
+    notes: str
+
+
 model = QwenChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
 
-theWebAgent = Agent[WebDeps](
+theWebAgent = Agent[WebDeps, WebSubmission](
     model,
     deps_type=WebDeps,
+    output_type=ToolOutput(
+        WebSubmission,
+        name="submit",
+        description=(
+            "Finish the web-search task with the relative paths actually "
+            "written and brief notes for the planner."
+        ),
+    ),
     system_prompt=web_system_prompt,
     retries=3,
     model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False})
@@ -88,7 +101,7 @@ Persist your findings with `write_file`, and carry a source URL for every
 factual claim or figure you write — downstream tasks and the user rely on these.
 
 WHEN DONE:
-Call the submit tool with:
+Return the terminal `submit` output with:
   - produced: list of relative paths you wrote
   - notes: 1-2 sentences flagging anything the planner should know
     (judgment calls, data limitations, sources that were unavailable and what
@@ -96,7 +109,7 @@ Call the submit tool with:
     do NOT claim to have used a tool you did not actually call — the planner
     can see the produced files.
 
-Do not call submit until you have written all expected files.
+Do not submit until you have written all expected files.
 """
 
 def _resolve_inside(workspace: Path, path: str) -> Path | str:
@@ -110,12 +123,12 @@ def _resolve_inside(workspace: Path, path: str) -> Path | str:
         return f"ERROR: path {path} is outside the workspace"
     return absolute_path
 
-@theWebAgent.tool(retries=1)
-async def submit(ctx: RunContext[WebDeps], produced: list[str], notes: str) -> str:
-    """Submit the final result. Call exactly once, after all expected files
-    are written. Validates each produced path exists in the workspace and is
-    non-empty before accepting."""
-    workspace = ctx.deps.workspace
+async def _accept_submission(
+    deps: WebDeps,
+    produced: list[str],
+    notes: str,
+) -> ExecutorResult:
+    workspace = deps.workspace
     normalized = []
     for path in produced:
         p = Path(path)
@@ -123,25 +136,37 @@ async def submit(ctx: RunContext[WebDeps], produced: list[str], notes: str) -> s
             try:
                 p = p.relative_to(workspace)
             except ValueError:
-                return f"ERROR: path {path} is outside workspace; use relative paths"
+                return ExecutorResult(
+                    produced=[],
+                    notes="",
+                    error=f"path {path} is outside workspace; use relative paths",
+                )
         absolute_path = workspace / p
         if not absolute_path.exists():
-            return f"ERROR: claimed file {path} does not exist"
+            return ExecutorResult(
+                produced=[],
+                notes="",
+                error=f"claimed file {path} does not exist",
+            )
         if absolute_path.stat().st_size == 0:
-            return f"ERROR: claimed file {path} is empty"
+            return ExecutorResult(
+                produced=[],
+                notes="",
+                error=f"claimed file {path} is empty",
+            )
         normalized.append(str(p))
 
-    ctx.deps.submitted = ExecutorResult(produced=normalized, notes=notes)
+    return ExecutorResult(produced=normalized, notes=notes)
 
-    # Emit the final set of produced files to the event log as artifacts, so the
-    # UI gets one consolidated "here is what this agent made" event in addition
-    # to the per-file artifact_ready events from write_file. Inline the text
-    # content for text files (md/txt/csv/json) so the UI can preview them with
-    # no URL — same as write_file. Binary files carry no content; they preview
-    # via the persisted-outputs download route once the run is saved.
+
+async def _publish_submission(
+    deps: WebDeps,
+    submission: WebSubmission,
+) -> None:
+    """Publish the validated final artifact set exactly once."""
     artifacts = []
-    for rel in normalized:
-        full = workspace / rel
+    for rel in submission.produced:
+        full = deps.workspace / rel
         suffix = Path(rel).suffix.lower()
         content = None
         if suffix in {".md", ".txt", ".csv", ".json"}:
@@ -160,16 +185,29 @@ async def submit(ctx: RunContext[WebDeps], produced: list[str], notes: str) -> s
                 content=content,
             )
         )
-    await ctx.deps.sink.publish_ui(
+    await deps.sink.publish_ui(
         "artifact_ready",
         stage="web_search",
         status="progress",
-        message=f"Web search agent produced {len(normalized)} file(s)",
-        data={"produced": normalized, "notes": notes},
+        message=f"Web search agent produced {len(submission.produced)} file(s)",
+        data={"produced": submission.produced, "notes": submission.notes},
         artifacts=artifacts,
     )
 
-    return "Result submitted successfully. You may stop."
+
+@theWebAgent.output_validator
+async def validate_web_submission(
+    ctx: RunContext[WebDeps],
+    submission: WebSubmission,
+) -> WebSubmission:
+    result = await _accept_submission(
+        ctx.deps,
+        submission.produced,
+        submission.notes,
+    )
+    if result.error:
+        raise ModelRetry(result.error)
+    return WebSubmission(produced=result.produced, notes=result.notes)
 
 
 @theWebAgent.tool(retries=1)
@@ -379,7 +417,7 @@ async def run_web_executor(
     task_prompt = _build_task_prompt(query, expects, dep_files, page_cache)
 
     try:
-        await theWebAgent.run(user_prompt=task_prompt, deps=deps)
+        run_result = await theWebAgent.run(user_prompt=task_prompt, deps=deps)
     except Exception as e:
         return ExecutorResult(
             produced=[],
@@ -387,10 +425,6 @@ async def run_web_executor(
             error=f"Agent loop failed {type(e).__name__}: {e}"
         )
 
-    if deps.submitted is None:
-        return ExecutorResult(
-            produced=[],
-            notes="",
-            error="Agent finished without calling submit"
-        )
-    return deps.submitted
+    submission = run_result.output
+    await _publish_submission(deps, submission)
+    return ExecutorResult(produced=submission.produced, notes=submission.notes)

@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, ToolOutput
 from pydantic_ai.usage import UsageLimits
 from sqlalchemy import select
 
@@ -144,7 +144,7 @@ def _build_report_router() -> Agent[RouterDeps, RouterResult]:
 def _build_outline_agent() -> Agent[None, ReportOutline]:
     return Agent(
         _build_model(),
-        output_type=ReportOutline,
+        output_type=ToolOutput(ReportOutline, name="submit_report_outline"),
         system_prompt=_OUTLINE_SYSTEM,
         retries=2,
     )
@@ -153,7 +153,7 @@ def _build_outline_agent() -> Agent[None, ReportOutline]:
 def _build_section_agent() -> Agent[None, SectionDraft]:
     return Agent(
         _build_model(),
-        output_type=SectionDraft,
+        output_type=ToolOutput(SectionDraft, name="submit_section_draft"),
         system_prompt=_SECTION_SYSTEM,
         retries=2,
     )
@@ -162,7 +162,7 @@ def _build_section_agent() -> Agent[None, SectionDraft]:
 def _build_critic_agent() -> Agent[None, CritiqueResult]:
     return Agent(
         _build_model(),
-        output_type=CritiqueResult,
+        output_type=ToolOutput(CritiqueResult, name="submit_report_critique"),
         system_prompt=_CRITIC_SYSTEM,
         retries=2,
     )
@@ -171,7 +171,7 @@ def _build_critic_agent() -> Agent[None, CritiqueResult]:
 def _build_summary_agent() -> Agent[None, ExecutiveSummary]:
     return Agent(
         _build_model(),
-        output_type=ExecutiveSummary,
+        output_type=ToolOutput(ExecutiveSummary, name="submit_executive_summary"),
         system_prompt=_SUMMARY_SYSTEM,
         retries=2,
     )

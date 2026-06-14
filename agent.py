@@ -36,7 +36,7 @@ from typing import Any
 
 import pandas as pd
 from openpyxl import load_workbook
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, ToolOutput
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
@@ -192,7 +192,7 @@ def _build_router(
     agent: Agent[RouterDeps, RouterResult] = Agent(
         _build_model(),
         deps_type=RouterDeps,
-        output_type=RouterResult,
+        output_type=ToolOutput(RouterResult, name="submit_document_route"),
         system_prompt=system_prompt,
         retries=2,
     )
@@ -422,7 +422,7 @@ def _build_excel_agent() -> Agent[ExcelDeps, ExcelResult]:
     agent: Agent[ExcelDeps, ExcelResult] = Agent(
         _build_model(),
         deps_type=ExcelDeps,
-        output_type=ExcelResult,
+        output_type=ToolOutput(ExcelResult, name="submit_table_analysis"),
         system_prompt=_EXCEL_SYSTEM,
         retries=2,
     )
@@ -552,7 +552,7 @@ File saving:
 def _build_answer_agent() -> Agent[None, AnswerResult]:
     return Agent(
         _build_model(),
-        output_type=AnswerResult,
+        output_type=ToolOutput(AnswerResult, name="submit_document_answer"),
         system_prompt=_ANSWER_SYSTEM,
         retries=2,
     )
