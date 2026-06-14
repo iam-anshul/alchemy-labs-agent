@@ -9,6 +9,8 @@ from browser_agent import ExecutorResult
 from typing import Literal
 import mimetypes
 import asyncio
+import hashlib
+import re
 
 from exa_py import Exa
 
@@ -28,7 +30,13 @@ exa_client = Exa(api_key=EXA_API_KEY)
 class WebDeps:
     workspace: Path
     sink: EventSink = field(default_factory=EventSink)
+    page_cache: dict[str, "CachedPage"] = field(default_factory=dict)
     submitted: ExecutorResult | None = None
+
+@dataclass
+class CachedPage:
+    url: str
+    content: str
 
 model = QwenChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
 
@@ -40,8 +48,17 @@ theWebAgent = Agent[WebDeps](
     model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False})
 )
 
-def _build_task_prompt(query: str, expects: str, dep_files: list[str]) -> str:
+def _build_task_prompt(
+    query: str,
+    expects: str,
+    dep_files: list[str],
+    page_cache: dict[str, CachedPage],
+) -> str:
     dep_section = "\n".join(f" - {p}" for p in dep_files) if dep_files else "none"
+    page_section = "\n".join(
+        f" - {page_id}: {page.url} ({len(page.content)} characters)"
+        for page_id, page in page_cache.items()
+    ) or "none"
     return f"""You are a web-search sub-agent. Complete the task below and submit your result.
 
 QUERY:
@@ -53,6 +70,9 @@ EXPECTED OUTPUT (files you must write):
 INPUT FILES FROM UPSTREAM TASKS (read these as needed using read_file):
 {dep_section}
 
+PAGES VISITED IN THIS RUN (search by page ID using search_page):
+{page_section}
+
 WORKSPACE:
 All paths you pass to tools are relative to your workspace root.
 Write your outputs under outputs/.
@@ -61,10 +81,11 @@ HOW TO WORK:
 Read any upstream input files first. Then use `web_search` as your primary tool
 to find information — it returns a synthesized, sourced answer plus citation
 URLs. Use `fetch_url` only when you need the full contents of a specific page
-(e.g. one of those citation URLs). Use the minimum number of web actions needed;
-do not search or fetch for sport. Persist your findings with `write_file`, and
-carry a source URL for every factual claim or figure you write — downstream
-tasks and the user rely on these.
+(e.g. one of those citation URLs). It caches the page and returns a page ID;
+use `search_page` to search the entire page without loading it into context.
+Use the minimum number of web actions needed; do not search or fetch for sport.
+Persist your findings with `write_file`, and carry a source URL for every
+factual claim or figure you write — downstream tasks and the user rely on these.
 
 WHEN DONE:
 Call the submit tool with:
@@ -254,19 +275,27 @@ async def web_search(ctx: RunContext[WebDeps], query: str, depth: Literal["stand
 
 @theWebAgent.tool(retries=3)
 async def fetch_url(ctx: RunContext[WebDeps], url: str):
-    """Fetch a single web page and return its full text contents.
+    """Fetch a page into the run cache and return its page ID.
 
     Use this when you already have a specific URL — typically one surfaced in
-    the `citations` of a web_search result — and you need the page's full text
-    (e.g. to extract a table, read a full article, or get details the search
-    answer only summarized), rather than the search engine's synthesized
-    summary. Forces a fresh crawl. Returns page text, not a saved binary file.
+    the `citations` of a web_search result. The full content stays outside model
+    context; call search_page with the returned page ID to inspect it.
 
     Args:
         url: The full, absolute URL of the page to fetch, including the scheme
             (e.g. "https://example.com/report"). Relative URLs or bare domains
             will not work.
     """
+    page_id = f"page_{hashlib.sha256(url.encode()).hexdigest()[:12]}"
+    cached = ctx.deps.page_cache.get(page_id)
+    if cached is not None:
+        return {
+            "page_id": page_id,
+            "url": cached.url,
+            "characters": len(cached.content),
+            "cached": True,
+        }
+
     await ctx.deps.sink.publish_ui(
         "agent_progress",
         stage="web_search",
@@ -279,17 +308,75 @@ async def fetch_url(ctx: RunContext[WebDeps], url: str):
     )
     if not response.results:
         return f"ERROR: no content retrieved for {url}"
-    return response.results[0].text
+    result = response.results[0]
+    content = result.text or ""
+    ctx.deps.page_cache[page_id] = CachedPage(
+        url=url,
+        content=content,
+    )
+    return {
+        "page_id": page_id,
+        "url": url,
+        "characters": len(content),
+        "cached": False,
+    }
+
+@theWebAgent.tool(retries=1)
+def search_page(
+    ctx: RunContext[WebDeps],
+    page_id: str,
+    pattern: str,
+    max_matches: int = 20,
+):
+    """Search every line of a cached page with a case-insensitive regex.
+
+    Only bounded matching excerpts enter model context. Use `|` to search for
+    multiple terms.
+    """
+    page = ctx.deps.page_cache.get(page_id)
+    if page is None:
+        return f"ERROR: unknown page_id {page_id}"
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        return f"ERROR: invalid regular expression: {e}"
+
+    limit = max(1, min(max_matches, 50))
+    matches = []
+    total_matches = 0
+    for line_number, line in enumerate(page.content.splitlines(), start=1):
+        for match in regex.finditer(line):
+            total_matches += 1
+            if len(matches) < limit:
+                start = max(0, match.start() - 200)
+                end = min(len(line), match.end() + 300)
+                matches.append({
+                    "line": line_number,
+                    "text": line[start:end].strip(),
+                })
+    return {
+        "page_id": page_id,
+        "url": page.url,
+        "pattern": pattern,
+        "total_matches": total_matches,
+        "matches": matches,
+        "truncated": total_matches > len(matches),
+    }
 
 async def run_web_executor(
         workspace_subdir_path: Path,
         query: str,
         expects: str,
         dep_files: list[str],
+        page_cache: dict[str, CachedPage],
         sink: EventSink = EventSink()
 ) -> ExecutorResult:
-    deps = WebDeps(workspace=workspace_subdir_path.resolve(), sink=sink.child(agent_type="web_search"))
-    task_prompt = _build_task_prompt(query, expects, dep_files)
+    deps = WebDeps(
+        workspace=workspace_subdir_path.resolve(),
+        sink=sink.child(agent_type="web_search"),
+        page_cache=page_cache,
+    )
+    task_prompt = _build_task_prompt(query, expects, dep_files, page_cache)
 
     try:
         await theWebAgent.run(user_prompt=task_prompt, deps=deps)

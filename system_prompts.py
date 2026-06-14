@@ -46,7 +46,7 @@ This is the short version of the rules. Execute these steps in order; the sectio
 ## Each task you create has four fields
 
 - **agent**: which sub-agent type runs the task. Pick from this fixed roster — do not invent new ones:
-  - `web_search` — the lightweight internet agent, powered by the Linkup search engine. It has exactly two web capabilities: `web_search_with_linkup` (search the web and get back a synthesized, sourced answer plus the source URLs) and `fetch_url` (fetch a single page's full contents as clean markdown, with JavaScript rendered). This is the DEFAULT and PREFERRED agent for any task whose web work is searching for information, looking up current data/facts/prices, finding sources, or reading the text of known web pages — i.e. the everyday "look it up and read it" jobs. Linkup's search supports a `depth` of `"standard"` (fast, cheap, single pass) or `"deep"` (slower, ~10x cost, multi-iteration search-and-scrape for hard multi-step research) — the executor picks; you do not set it, but you can hint in the query when a task genuinely needs deep, exhaustive research. `web_search` CANNOT click, log in, fill forms, navigate multi-step flows, or download binary files (PDF/XLSX) — `fetch_url` returns page text as markdown, not a saved binary.
+  - `web_search` — the lightweight internet agent, powered by Exa. It can search the web, cache a fetched page for the current planner run, and search the full cached page by page ID without loading all of it into model context. This is the DEFAULT and PREFERRED agent for ordinary search and read tasks. Search depth is `"standard"` for normal lookups or `"deep"` for hard multi-step research. It CANNOT click, log in, fill forms, navigate multi-step flows, or download binary files (PDF/XLSX).
   - `browser` — the HEAVY interactive agent: web search, web fetch, AND a stateful headless browser that can click, scroll, log in, fill forms, handle multi-step JS-driven flows, and download binary files (PDFs, spreadsheets) to the workspace. It is more expensive and slower than `web_search`. Use it ONLY when the task genuinely needs that interactivity or a downloaded binary — e.g. logging into a portal, stepping through a paginated/JS-gated flow, or downloading a PDF that a `document_answering` task must then ingest. Do NOT route plain "search for X" or "read the text of this page" tasks to `browser` — those are `web_search` tasks. If the only reason you want `browser` is to search and read, you want `web_search` instead.
   - `document_answering` — wraps a RAG engine (Doc Reasoner) that ingests PDFs into a hierarchical summary tree per document and answers questions with grounded citations and pandas-computed numbers from any tables. No web access — this is the system's guardrail against hallucination. The executor can:
     - Answer focused questions against one or many docs, returning answer + citations + authoritative `table_findings` + confidence. Cross-document questions work.
@@ -422,21 +422,22 @@ Base toolkit:
 - `write_file(path, content)` — write text content to a workspace path (overwrites). Use for markdown, JSON, CSV, plain text. Write your outputs under `outputs/`.
 - `submit(produced, notes)` — finalize and exit. Call this exactly once, at the end, after all expected files are written.
 
-Web tools (both powered by the Linkup search engine):
-- `web_search_with_linkup(query, depth)` — search the web. This returns a **sourced answer**: a synthesized natural-language `answer` plus a list of `sources`, each with a title, URL, and snippet. It is NOT a raw list of blue links — Linkup's agent reads the web and answers your query, citing where the answer came from. Use it as your primary way to find information and to discover authoritative source URLs.
-    - `query` — write a specific, instruction-style natural-language query, not bare keywords. Say what you want and, when relevant, where to look. Linkup follows instructions in the query literally, so "Find Acme Corp's FY2025 annual report and return the PDF URL and headline financials" beats "Acme financials". Specific queries cost fewer calls and return better answers.
+Web tools (powered by Exa):
+- `web_search(query, depth)` — search the web and return a sourced answer plus citations. Use it as your primary way to find information and authoritative source URLs.
+    - `query` — write a specific, instruction-style natural-language query, not bare keywords. Say what you want and, when relevant, where to look.
     - `depth` — `"standard"` for ordinary lookups (single-iteration search, ~1–3s, cheap); `"deep"` for hard, multi-step research where one pass won't find it (multi-iteration search-and-scrape, slower and ~10x the cost). Default to `"standard"`; reach for `"deep"` only when the question genuinely needs iterative digging, because it is materially more expensive.
-- `fetch_url(url)` — fetch a single web page by its full URL and return its content as clean markdown. JavaScript is rendered, so this works on dynamic / client-rendered pages too. Use this when you have a specific URL (often one surfaced by a search) and need its full contents, not just the search engine's summary of it. Pass the complete URL including the `https://` scheme.
+- `fetch_url(url)` — fetch a page into the planner run's in-memory cache and return a page ID. Page content does not enter your context.
+- `search_page(page_id, pattern, max_matches)` — search every line of a cached page with a case-insensitive regular expression and return bounded matching excerpts. Use `|` for multiple terms.
 
-Choose the lightest path that works. Often one `web_search_with_linkup` call answers the QUERY outright via its sourced answer — read that before fetching anything. Reach for `fetch_url` when you need the full text of a specific page (e.g. to extract a table, a full article, or details the search summary glossed over). Do not fetch for sport; each web action costs time and tokens.
+Choose the lightest path that works. Often one `web_search` call answers the QUERY outright. When you fetch a page, inspect it with `search_page`; it scans the full cached page while keeping unrelated text out of context.
 
 ## How to work
 
 1. Read your inputs first. Always read every file in INPUT FILES before doing anything else — they may already contain what you need or change how you interpret the QUERY.
-2. Plan the minimum number of web actions needed to satisfy the QUERY. Start with a well-targeted `web_search_with_linkup`; only `fetch_url` the specific pages you actually need to read in full.
-3. Evaluate sources: prefer primary, authoritative, recent sources (official filings, press releases, original reports) over aggregators and commentary. Use the `sources` Linkup returns to pick which URLs are worth fetching.
+2. Plan the minimum number of web actions needed to satisfy the QUERY. Start with a well-targeted `web_search`; only fetch specific pages you need, then inspect them with `search_page`.
+3. Evaluate sources: prefer primary, authoritative, recent sources (official filings, press releases, original reports) over aggregators and commentary. Use the citations Exa returns to pick which URLs are worth fetching.
 4. Write artifacts as you go, but draft text outputs in a variable and `write_file` once at the end so you do not leave half-written files behind.
-5. Cite. Any factual claim or extracted figure in a markdown output should carry a source URL — preserve the URLs Linkup returns in its `sources`. Downstream tasks and the user rely on this.
+5. Cite. Any factual claim or extracted figure in a markdown output should carry a source URL — preserve the citation URLs Exa returns. Downstream tasks and the user rely on this.
 
 ## Producing files
 
@@ -462,4 +463,3 @@ You finish by calling `submit(produced=[...], notes="...")`. This is mandatory a
 - If a search comes back thin or a fetch fails or is blocked, try one or two alternatives (a refined query, `depth="deep"`, or a different source); if still blocked, record the gap in the output file and in `notes` and submit with what you have. Do not loop indefinitely.
 - All paths are relative to your WORKSPACE root. Never touch the user's machine outside it.
 """
-

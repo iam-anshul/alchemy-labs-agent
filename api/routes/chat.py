@@ -8,7 +8,7 @@ from browser_agent import BrowserExecutor, ExecutorResult
 from agent_schemas import QueryAnswer
 from report_schemas import ReportResult
 from office_agent import run_office_executor
-from web_agent import run_web_executor
+from web_agent import CachedPage, run_web_executor
 from api.ingest import start_workers, shutdown_workers
 from api.routes.documents import ingest_local_file
 from db import SessionLocal
@@ -376,6 +376,7 @@ async def dispatch_executor_agent(
     task_spec: TaskSpec,
     dep_files: list[str],
     subdir_path: Path,
+    page_cache: dict[str, CachedPage],
     workspace_id: str,
     user_id: UUID,
     query_id: str,
@@ -518,6 +519,7 @@ async def dispatch_executor_agent(
                 query=task_spec.query,
                 expects=task_spec.expects,
                 dep_files=dep_files,
+                page_cache=page_cache,
                 sink=task_sink,
             )
             await task_sink.publish_ui(
@@ -677,6 +679,7 @@ async def create_chat(
     # shutdown_workers in finally drains any remaining ingests before exit so
     # a doc the planner kicked off late still finishes before the process dies.
     start_workers(n=2)
+    page_cache: dict[str, CachedPage] = {}
     try:
         thisRun.plan = await planner(thisRun, sink)
 
@@ -834,6 +837,7 @@ async def create_chat(
                             task,
                             dep_files,
                             Path(absolute_workspace_path_with_subdir),
+                            page_cache,
                             workspace_id=workspace_name,
                             user_id=user_id,
                             query_id=str(query_id),
@@ -938,6 +942,7 @@ async def create_chat(
                                     task,
                                     dep_files,
                                     Path(absolute_workspace_path_with_subdir),
+                                    page_cache,
                                     workspace_id=workspace_name,
                                     user_id=user_id,
                                     query_id=str(query_id),
