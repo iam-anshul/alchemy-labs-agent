@@ -50,17 +50,29 @@ class PlanOutput(BaseModel):
 
 class ReplanDecision(BaseModel):
     """Output of a REPLAN call. The planner first decides whether the in-flight
-    plan needs revision at all; only when it does must it emit a full revised
-    plan. This means the common 'no change needed' case requires emitting just
+    plan needs revision at all; only when it does does it fill in the plan
+    fields. The common 'no change needed' case requires emitting just
     `needs_change=false` — the planner never regenerates (and so can never
-    accidentally drop) the task list on a no-op replan."""
+    accidentally drop) the task list on a no-op replan.
+
+    The plan fields are FLAT here (tasks/notes/... at the top level), NOT a
+    nested PlanOutput object. This is deliberate: the model used here (Qwen via
+    tool calling) tends to emit a nested object field as a JSON-encoded *string*,
+    which fails validation and burns the agent's output retries until it crashes.
+    A flat schema sidesteps that entirely. planner() assembles a real PlanOutput
+    from these fields when needs_change is True (and validates tasks then)."""
     needs_change: bool = Field(
         description="True only if the in-flight plan must be revised in light of executor results/notes. False to leave the plan exactly as-is (the common case)."
     )
-    revised_plan: PlanOutput | None = Field(
-        default=None,
-        description="The COMPLETE revised plan (all tasks, not a delta). REQUIRED when needs_change is True; leave null when needs_change is False.",
-    )
+    # The fields below mirror PlanOutput but are all optional, since they are
+    # only filled when needs_change is True. tasks has NO min_length here (unlike
+    # PlanOutput) because the no-change case legitimately leaves it empty;
+    # planner() rejects an empty task list on a needs_change=True decision.
+    goal: str = Field(default="", description="When needs_change=True: the distilled goal. Ignored when needs_change=False.")
+    tasks: list[TaskSpec] = Field(default_factory=list, description="When needs_change=True: the COMPLETE revised task list (every task, not a delta; reuse ids of tasks that already ran so their state carries over). Leave empty when needs_change=False.")
+    needs_user_feedback: bool = Field(default=False, description="Same meaning as on the initial plan. Only relevant when needs_change=True.")
+    feedback_question: str | None = Field(default=None, description="The question to ask the user, only when needs_user_feedback=True.")
+    notes: str | None = Field(default=None, description="Optional free-form notes explaining what changed and why.")
 
 class QueryRun(BaseModel): # the name should be changed to QueryRun in the upcoming version
     user_query: str        # the raw user input that kicked off the run

@@ -3,7 +3,8 @@ from dotenv import load_dotenv
 from pydantic_ai import Agent, RunContext
 from formats_pydantic import PlanOutput, ReplanDecision
 from system_prompts import planner_system_prompt
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
+from pydantic_ai.models.openai import OpenAIChatModelSettings
+from qwen_compat import QwenChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from dataclasses import dataclass
 from db.utils import get_docID_by_name, get_reportID_by_name
@@ -15,7 +16,7 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL")
 
-model = OpenAIChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
+model = QwenChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
 
 @dataclass
 class PlannerDeps:

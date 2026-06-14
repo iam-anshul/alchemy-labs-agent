@@ -1,6 +1,7 @@
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
+from pydantic_ai.models.openai import OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
+from qwen_compat import QwenChatModel
 from system_prompts import web_system_prompt
 from dataclasses import dataclass, field
 from api.events import EventSink, file_artifact
@@ -29,7 +30,7 @@ class WebDeps:
     sink: EventSink = field(default_factory=EventSink)
     submitted: ExecutorResult | None = None
 
-model = OpenAIChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
+model = QwenChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
 
 theWebAgent = Agent[WebDeps](
     model,
@@ -113,18 +114,29 @@ async def submit(ctx: RunContext[WebDeps], produced: list[str], notes: str) -> s
 
     # Emit the final set of produced files to the event log as artifacts, so the
     # UI gets one consolidated "here is what this agent made" event in addition
-    # to the per-file artifact_ready events from write_file.
+    # to the per-file artifact_ready events from write_file. Inline the text
+    # content for text files (md/txt/csv/json) so the UI can preview them with
+    # no URL — same as write_file. Binary files carry no content; they preview
+    # via the persisted-outputs download route once the run is saved.
     artifacts = []
     for rel in normalized:
         full = workspace / rel
+        suffix = Path(rel).suffix.lower()
+        content = None
+        if suffix in {".md", ".txt", ".csv", ".json"}:
+            try:
+                content = full.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                content = None
         artifacts.append(
             file_artifact(
-                kind="markdown" if Path(rel).suffix.lower() == ".md" else "file",
+                kind="markdown" if suffix == ".md" else "file",
                 path=rel,
                 filename=Path(rel).name,
-                type=Path(rel).suffix.lstrip(".").lower() or None,
+                type=suffix.lstrip(".") or None,
                 mime_type=mimetypes.guess_type(str(full))[0],
                 bytes=full.stat().st_size,
+                content=content,
             )
         )
     await ctx.deps.sink.publish_ui(

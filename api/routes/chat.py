@@ -234,12 +234,19 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
     )
     replan_run = await replanAgent.run(user_prompt=replan_prompt, deps=PlannerDeps(workspace_name=run.workspace_id))
     decision = replan_run.output
-    # No change wanted, or the model said "change" but gave no plan -> treat as
-    # no-op (don't adopt anything, don't spend budget). Only a genuine revised
-    # plan is returned.
-    if not decision.needs_change or decision.revised_plan is None:
+    # No change wanted, or the model said "change" but gave no tasks -> treat as
+    # a no-op (don't adopt anything, don't spend budget). Assembling the revised
+    # PlanOutput from the flat decision fields ourselves (rather than nesting a
+    # PlanOutput in the schema) avoids the model stringifying a nested object.
+    if not decision.needs_change or not decision.tasks:
         return None
-    return decision.revised_plan
+    return PlanOutput(
+        goal=decision.goal,
+        tasks=decision.tasks,
+        needs_user_feedback=decision.needs_user_feedback,
+        feedback_question=decision.feedback_question,
+        notes=decision.notes,
+    )
 
 async def publish_todo_artifact(run: QueryRun, sink: EventSink, *, phase: str) -> None:
     todo_path = Path(run.workspace) / "todo.md"

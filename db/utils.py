@@ -5,6 +5,7 @@ and commits within that session.  The caller manages session lifecycle.
 """
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from sqlalchemy import desc, exists, select, func
@@ -257,6 +258,43 @@ def list_recent_runs(
     ))
     return list(reversed(rows))
 
+
+def list_workspace_runs(
+    db: Session, workspace_id: str, user_id: UUID
+) -> list[QueryRun]:
+    """Return every run in a workspace owned by this user, newest first.
+
+    Powers the workspace "Recent runs" list in the UI. Scoped by user_id (not
+    just workspace_id) so a run list can never leak across users, mirroring the
+    other workspace-scoped reads. Unlike list_recent_runs (planner history,
+    capped at 5 and chronological), this is the full history newest-first for
+    display."""
+    return list(db.scalars(
+        select(QueryRun)
+        .where(
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.user_id == user_id,
+        )
+        .order_by(desc(QueryRun.started_at))
+    ))
+
+
+def get_workspace_run(
+    db: Session, workspace_id: str, query_id: UUID, user_id: UUID
+) -> QueryRun | None:
+    """Fetch a single run by id, scoped to its workspace and owning user.
+
+    Backs the run-detail page (GET /workspace/{ws}/runs/{run_id}). Returns None
+    if there is no such run for this user — the route turns that into a 404,
+    which the frontend treats as 'not found / history unavailable'."""
+    return db.scalar(
+        select(QueryRun).where(
+            QueryRun.query_id == query_id,
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.user_id == user_id,
+        )
+    )
+
 #------------------------------------------my additions------------------------------------------------------
 # functions needed for chat router APIs
 # create workspace function which is already here
@@ -384,6 +422,82 @@ def get_latest_prior_run_artifacts(
     if row is None or not row.produced_artifacts:
         return []
     return list(row.produced_artifacts)
+
+
+def list_workspace_produced_artifacts(
+    db: Session, workspace_id: str, user_id: UUID
+) -> list[dict]:
+    """Flatten every run's produced_artifacts in this workspace into one list,
+    newest run first. Each entry is the stored
+    {rel_path, content_b64, bytes, task_id} dict, augmented with the owning
+    run's query_id (as 'run_id') and its started_at so the route can build URLs
+    and a modified_at without a second lookup. Scoped by user_id."""
+    rows = db.scalars(
+        select(QueryRun)
+        .where(
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.user_id == user_id,
+        )
+        .order_by(desc(QueryRun.started_at))
+    )
+    out: list[dict] = []
+    for run in rows:
+        for art in (run.produced_artifacts or []):
+            out.append({
+                **art,
+                "run_id": str(run.query_id),
+                "run_started_at": run.started_at.isoformat(),
+            })
+    return out
+
+
+def get_run_produced_artifacts(
+    db: Session, workspace_id: str, query_id: UUID, user_id: UUID
+) -> list[dict] | None:
+    """Produced artifacts for a single run (same augmented shape as
+    list_workspace_produced_artifacts). Returns None if the run doesn't exist
+    for this user (so the route can 404), or [] if it produced nothing."""
+    run = db.scalar(
+        select(QueryRun).where(
+            QueryRun.query_id == query_id,
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.user_id == user_id,
+        )
+    )
+    if run is None:
+        return None
+    return [
+        {
+            **art,
+            "run_id": str(run.query_id),
+            "run_started_at": run.started_at.isoformat(),
+        }
+        for art in (run.produced_artifacts or [])
+    ]
+
+
+def get_run_artifact_bytes(
+    db: Session, workspace_id: str, query_id: UUID, user_id: UUID, rel_path: str
+) -> tuple[bytes, dict] | None:
+    """Return (raw_bytes, artifact_dict) for one produced file of a run, decoded
+    from its stored base64. None if the run or the file isn't found for this
+    user. Backs the file download/preview route."""
+    run = db.scalar(
+        select(QueryRun).where(
+            QueryRun.query_id == query_id,
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.user_id == user_id,
+        )
+    )
+    if run is None:
+        return None
+    for art in (run.produced_artifacts or []):
+        if art.get("rel_path") == rel_path:
+            content_b64 = art.get("content_b64")
+            if content_b64 is None:
+                return None
+            return base64.b64decode(content_b64), art
+    return None
 
 
 # delete a workspace and everything scoped to it

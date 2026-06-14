@@ -10,8 +10,9 @@ from pathlib import Path
 from api.events import EventSink, file_artifact
 from dotenv import load_dotenv
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
+from pydantic_ai.models.openai import OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
+from qwen_compat import QwenChatModel
 
 from browser_agent import ExecutorResult
 from system_prompts import office_system_prompt
@@ -43,7 +44,7 @@ class OfficeDeps:
     submitted: ExecutorResult | None = None
 
 
-model = OpenAIChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
+model = QwenChatModel(MODEL, provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_KEY))
 
 theOfficeAgent = Agent[OfficeDeps, str](
     model,

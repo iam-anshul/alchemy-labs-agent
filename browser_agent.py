@@ -360,6 +360,18 @@ class BrowserExecutor:
             if rel in before:
                 continue
             mime, _ = mimetypes.guess_type(str(p))
+            suffix = p.suffix.lower()
+            # Inline text content (md/txt/csv/json) so the UI can preview it with
+            # no URL — same as the write_file tool. Without this, a saved .md
+            # would render the "No preview URL is available" fallback. Binary
+            # files carry no content and preview via the download route once
+            # the run is persisted.
+            content = None
+            if suffix in {".md", ".txt", ".csv", ".json"}:
+                try:
+                    content = p.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    content = None
             await sink.publish_ui(
                 "artifact_ready",
                 stage="download",
@@ -367,12 +379,13 @@ class BrowserExecutor:
                 message=f"Browser saved {p.name}",
                 artifacts=[
                     file_artifact(
-                        kind="file",
+                        kind="markdown" if suffix == ".md" else "file",
                         path=rel,
                         filename=p.name,
-                        type=p.suffix.lstrip(".").lower() or None,
+                        type=suffix.lstrip(".") or None,
                         mime_type=mime,
                         bytes=p.stat().st_size,
+                        content=content,
                     )
                 ],
             )
