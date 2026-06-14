@@ -28,6 +28,7 @@ final-result tool call).
 """
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
@@ -35,6 +36,60 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.settings import ModelSettings
+
+
+def _resolve_ref(ref: str, defs: dict[str, Any]) -> Any:
+    """Resolve a local JSON-Schema `$ref` (e.g. "#/$defs/TaskSpec") against the
+    collected definitions. Only local refs into $defs/definitions are supported;
+    anything else is returned as an empty schema (the model will treat it as
+    unconstrained rather than choke on a dangling ref)."""
+    parts = ref.lstrip("#/").split("/")
+    if len(parts) == 2 and parts[0] in ("$defs", "definitions"):
+        return defs.get(parts[1], {})
+    return {}
+
+
+def _inline_refs(node: Any, defs: dict[str, Any], seen: tuple[str, ...] = ()) -> Any:
+    """Recursively replace every local `$ref` in `node` with a deep copy of the
+    schema it points at, so the resulting JSON Schema is fully self-contained
+    with no `$ref`/`$defs`/`definitions`. GLM-5.1 (and some other OpenAI-compat
+    backends) reject schemas that use these; pydantic emits them for any nested
+    model. `seen` guards against infinite recursion on a self-referential model
+    by leaving a cycle's repeat occurrence as an empty (unconstrained) schema."""
+    if isinstance(node, dict):
+        if "$ref" in node:
+            ref = node["$ref"]
+            if ref in seen:
+                # Recursive model: stop expanding; emit an unconstrained object.
+                return {"type": "object"}
+            resolved = _resolve_ref(ref, defs)
+            inlined = _inline_refs(copy.deepcopy(resolved), defs, seen + (ref,))
+            # Merge any sibling keys (e.g. "description") that sat alongside $ref.
+            if isinstance(inlined, dict):
+                for k, v in node.items():
+                    if k != "$ref":
+                        inlined.setdefault(k, v)
+            return inlined
+        return {
+            k: _inline_refs(v, defs, seen)
+            for k, v in node.items()
+            if k not in ("$defs", "definitions")
+        }
+    if isinstance(node, list):
+        return [_inline_refs(item, defs, seen) for item in node]
+    return node
+
+
+def _dereference_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of `schema` with all local `$ref`s inlined and the
+    `$defs`/`definitions` blocks stripped. No-op (returns the same object) when
+    the schema has no refs/defs, so well-formed schemas are untouched."""
+    if not isinstance(schema, dict):
+        return schema
+    defs = {**schema.get("$defs", {}), **schema.get("definitions", {})}
+    if not defs and "$ref" not in json.dumps(schema):
+        return schema
+    return _inline_refs(schema, defs)
 
 
 def _collection_params(json_schema: dict[str, Any]) -> set[str]:
@@ -123,12 +178,29 @@ class QwenChatModel(OpenAIChatModel):
                 )
         return response
 
+    def _inline_tool_schemas(
+        self, params: ModelRequestParameters
+    ) -> ModelRequestParameters:
+        """Inline every `$ref`/`$defs` in the function- and output-tool schemas
+        before they hit the wire. GLM-5.1 rejects non-inlined JSON Schema
+        ($ref/$defs/definitions unsupported); pydantic emits refs for any nested
+        model (PlanOutput → TaskSpec, etc.). We mutate the tool definitions in
+        place since each is rebuilt per request from the agent's tool set."""
+        for tool in (*params.function_tools, *params.output_tools):
+            tool.parameters_json_schema = _dereference_schema(
+                tool.parameters_json_schema
+            )
+        return params
+
     async def request(
         self,
         messages: Any,
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
+        model_request_parameters = self._inline_tool_schemas(
+            model_request_parameters
+        )
         response = await super().request(
             messages, model_settings, model_request_parameters
         )
