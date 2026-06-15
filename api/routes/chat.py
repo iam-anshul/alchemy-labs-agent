@@ -3,7 +3,13 @@ import base64
 import hashlib
 import traceback
 from pathlib import Path
-from orchestrator import plannerAgent, replanAgent, PlannerDeps
+from orchestrator import (
+    axisAgent,
+    axisAppendPlannerAgent,
+    plannerAgent,
+    replanAgent,
+    PlannerDeps,
+)
 from browser_agent import BrowserExecutor, ExecutorResult
 from agent_schemas import QueryAnswer
 from report_schemas import ReportResult
@@ -13,7 +19,14 @@ from api.ingest import start_workers, shutdown_workers
 from api.routes.documents import ingest_local_file
 from db import SessionLocal
 from db import utils as db_utils
-from formats_pydantic import QueryRun, PlanOutput, TaskSpec, ChatAcceptedResponse, InternalDocAgentDeps
+from formats_pydantic import (
+    AxisPlanAddition,
+    QueryRun,
+    PlanOutput,
+    TaskSpec,
+    ChatAcceptedResponse,
+    InternalDocAgentDeps,
+)
 from render_todo import render_todo
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart, TextPart
 from time import time
@@ -48,6 +61,20 @@ chat_router = APIRouter()
 # failures (a one-off hang, a flaky page) without spending a replan.
 MAX_DISPATCH_ATTEMPTS = 3
 USER_FEEDBACK_TIMEOUT_SECONDS = 300
+AXIS_EVIDENCE_FILE_CHAR_LIMIT = 20_000
+AXIS_EVIDENCE_TOTAL_CHAR_LIMIT = 80_000
+AXIS_APPEND_ATTEMPTS = 3
+AXIS_READABLE_SUFFIXES = {
+    ".csv",
+    ".htm",
+    ".html",
+    ".json",
+    ".md",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
 _pending_input: dict[str, asyncio.Future] = {}
 
@@ -126,6 +153,13 @@ def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
     for t in new.tasks:
         if t.id in old_by_id:
             old_t = old_by_id[t.id]
+            if old_t.axis_checkpoint and not t.axis_checkpoint:
+                # Axis controls are intentionally absent from todo.md, so the
+                # ordinary replanner may omit them when regenerating a full
+                # plan. Preserve a pending checkpoint unless the task id itself
+                # is removed from the revised plan.
+                t.axis_checkpoint = True
+                t.axis_focus = old_t.axis_focus
             rewritten = (t.query, t.expects, t.agent, t.doc_deps, t.deps) != (old_t.query, old_t.expects, old_t.agent, old_t.doc_deps, old_t.deps)
             if old_t.status == "failed" and rewritten:
                 # planner changed approach for a failed task -> let it run again.
@@ -146,6 +180,258 @@ def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
                 t.error = old_t.error
                 t.notes = old_t.notes
     return new
+
+
+def _axis_evidence_task_ids(run: QueryRun, checkpoint_task: TaskSpec) -> list[str]:
+    """Return the completed transitive dependency set for a checkpoint."""
+    if run.plan is None:
+        return []
+    tasks_by_id = {task.id: task for task in run.plan.tasks}
+    selected: set[str] = set()
+
+    def visit(task_id: str) -> None:
+        if task_id in selected:
+            return
+        task = tasks_by_id.get(task_id)
+        if task is None or task.status != "completed":
+            return
+        for dep_id in task.deps:
+            visit(dep_id)
+        selected.add(task_id)
+
+    visit(checkpoint_task.id)
+    return [task.id for task in run.plan.tasks if task.id in selected]
+
+
+def _build_axis_evidence_bundle(run: QueryRun, checkpoint_task: TaskSpec) -> str:
+    """Load bounded readable artifacts produced along the checkpoint path."""
+    if run.plan is None:
+        return "No completed evidence was available."
+
+    workspace = Path(run.workspace).resolve()
+    tasks_by_id = {task.id: task for task in run.plan.tasks}
+    sections: list[str] = []
+    remaining = AXIS_EVIDENCE_TOTAL_CHAR_LIMIT
+
+    for task_id in _axis_evidence_task_ids(run, checkpoint_task):
+        task = tasks_by_id[task_id]
+        lines = [
+            f"Task {task.id}: {task.title}",
+            f"Task query: {task.query}",
+            f"Executor notes: {task.notes or '(none)'}",
+        ]
+        for rel in task.produced:
+            full = (workspace / rel).resolve()
+            try:
+                full.relative_to(workspace)
+            except ValueError:
+                lines.append(f"Artifact {rel}: omitted because it is outside the workspace.")
+                continue
+            if full.suffix.lower() not in AXIS_READABLE_SUFFIXES:
+                lines.append(f"Artifact {rel}: binary or unsupported for inline review.")
+                continue
+            if not full.is_file():
+                lines.append(f"Artifact {rel}: missing.")
+                continue
+            if remaining <= 0:
+                lines.append("Further artifacts omitted because the evidence limit was reached.")
+                break
+            try:
+                content = full.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                lines.append(f"Artifact {rel}: could not be decoded as UTF-8.")
+                continue
+
+            limit = min(AXIS_EVIDENCE_FILE_CHAR_LIMIT, remaining)
+            excerpt = content[:limit]
+            remaining -= len(excerpt)
+            suffix = "\n[artifact truncated]" if len(content) > limit else ""
+            lines.append(f"Artifact {rel}:\n{excerpt}{suffix}")
+
+        sections.append("\n".join(lines))
+        if remaining <= 0:
+            break
+
+    return "\n\n".join(sections) or "No completed readable evidence was available."
+
+
+def _validate_axis_addition(
+    run: QueryRun,
+    checkpoint_task: TaskSpec,
+    addition: AxisPlanAddition,
+) -> str | None:
+    """Validate append-only ids, dependency order, and checkpoint reachability."""
+    if run.plan is None:
+        return "the current plan is missing"
+
+    existing_ids = {task.id for task in run.plan.tasks}
+    known_ids = set(existing_ids)
+    reaches_checkpoint: set[str] = set()
+    new_ids: set[str] = set()
+    checkpoint_positions = [
+        index for index, task in enumerate(addition.tasks) if task.axis_checkpoint
+    ]
+
+    if len(checkpoint_positions) > 1:
+        return "the appended segment contains more than one axis checkpoint"
+    if checkpoint_positions and checkpoint_positions[0] != len(addition.tasks) - 1:
+        return "an appended axis checkpoint must be the final task in the segment"
+    if checkpoint_positions and run.axis_checkpoints_used + 1 >= run.axis_checkpoint_budget:
+        return "the appended segment requests a checkpoint but no checkpoint budget remains"
+
+    for task in addition.tasks:
+        if task.id in known_ids or task.id in new_ids:
+            return f"task id {task.id!r} is not a unique new id"
+        unknown_deps = [dep for dep in task.deps if dep not in known_ids]
+        if unknown_deps:
+            return (
+                f"task {task.id!r} depends on unknown or later task ids "
+                f"{unknown_deps}"
+            )
+        if (
+            checkpoint_task.id not in task.deps
+            and not any(dep in reaches_checkpoint for dep in task.deps)
+        ):
+            return (
+                f"task {task.id!r} is not downstream of checkpoint "
+                f"{checkpoint_task.id!r}"
+            )
+
+        new_ids.add(task.id)
+        known_ids.add(task.id)
+        reaches_checkpoint.add(task.id)
+
+    return None
+
+
+def _append_axis_tasks(run: QueryRun, addition: AxisPlanAddition) -> None:
+    """Append validated planner tasks while resetting model-owned run state."""
+    if run.plan is None:
+        raise ValueError("cannot append tasks without a current plan")
+    for task in addition.tasks:
+        task.status = "pending"
+        task.produced = []
+        task.notes = ""
+        task.error = ""
+        run.plan.tasks.append(task)
+    if addition.notes:
+        previous = (run.plan.notes or "").strip()
+        run.plan.notes = "\n".join(part for part in (previous, addition.notes.strip()) if part)
+
+
+def _initial_axis_plan_error(plan: PlanOutput) -> str | None:
+    checkpoint_positions = [
+        index for index, task in enumerate(plan.tasks) if task.axis_checkpoint
+    ]
+    if len(checkpoint_positions) > 1:
+        return "an initial plan may contain at most one axis checkpoint"
+    if checkpoint_positions and checkpoint_positions[0] != len(plan.tasks) - 1:
+        return "an initial axis checkpoint must be the final task in the plan segment"
+    return None
+
+
+def _replan_axis_error(run: QueryRun, plan: PlanOutput) -> str | None:
+    """Validate the effective pending checkpoint after a full-plan replan."""
+    if run.plan is None:
+        return None
+    old_by_id = {task.id: task for task in run.plan.tasks}
+    checkpoint_positions: list[int] = []
+
+    for index, task in enumerate(plan.tasks):
+        old_task = old_by_id.get(task.id)
+        effective_checkpoint = task.axis_checkpoint or bool(
+            old_task
+            and old_task.status == "pending"
+            and old_task.axis_checkpoint
+        )
+        effective_status = old_task.status if old_task is not None else "pending"
+        if effective_status == "pending" and effective_checkpoint:
+            checkpoint_positions.append(index)
+
+    if len(checkpoint_positions) > 1:
+        return "a revised plan may contain at most one pending axis checkpoint"
+    if checkpoint_positions and checkpoint_positions[0] != len(plan.tasks) - 1:
+        return "a pending axis checkpoint must be the final task in the plan segment"
+    if checkpoint_positions and run.axis_checkpoints_used >= run.axis_checkpoint_budget:
+        return "the axis checkpoint budget is exhausted"
+    return None
+
+
+async def run_axis_checkpoint(
+    run: QueryRun,
+    checkpoint_task: TaskSpec,
+    sink: EventSink,
+) -> AxisPlanAddition:
+    """Critique checkpoint evidence, then obtain a validated append-only segment."""
+    axis_sink = sink.child(task_id=checkpoint_task.id, agent_type="planner")
+    await axis_sink.publish_ui(
+        "agent_started",
+        stage="replanning",
+        status="started",
+        message="Reviewing completed evidence",
+        data={"phase": "evidence_review"},
+    )
+
+    evidence_bundle = _build_axis_evidence_bundle(run, checkpoint_task)
+    critique_prompt = (
+        f"USER QUESTION:\n{run.user_query}\n\n"
+        f"CURRENT PLAN:\n{render_todo(run)}\n\n"
+        f"CHECKPOINT TASK:\n"
+        f"id: {checkpoint_task.id}\n"
+        f"title: {checkpoint_task.title}\n"
+        f"focus: {checkpoint_task.axis_focus}\n\n"
+        f"COMPLETED EVIDENCE:\n{evidence_bundle}"
+    )
+    critique_run = await axisAgent.run(user_prompt=critique_prompt)
+    critique = critique_run.output.reasoning
+
+    existing_ids = [task.id for task in run.plan.tasks] if run.plan else []
+    remaining_budget = max(
+        0,
+        run.axis_checkpoint_budget - run.axis_checkpoints_used - 1,
+    )
+    base_append_prompt = (
+        f"USER GOAL:\n{run.goal}\n\n"
+        f"CURRENT PLAN:\n{render_todo(run)}\n\n"
+        f"COMPLETED CHECKPOINT:\n"
+        f"id: {checkpoint_task.id}\n"
+        f"title: {checkpoint_task.title}\n"
+        f"produced: {checkpoint_task.produced}\n\n"
+        f"RESERVED EXISTING TASK IDS:\n{existing_ids}\n\n"
+        f"REMAINING CHECKPOINT BUDGET AFTER THIS PASS:\n{remaining_budget}\n\n"
+        f"INTERNAL EVIDENCE CRITIQUE:\n{critique}\n\n"
+        "Append the next task segment. Return only new tasks."
+    )
+
+    validation_error: str | None = None
+    for attempt in range(1, AXIS_APPEND_ATTEMPTS + 1):
+        prompt = base_append_prompt
+        if validation_error:
+            prompt += (
+                "\n\nYour previous appended segment was rejected for this "
+                f"control-loop reason:\n{validation_error}\n"
+                "Correct the segment while preserving the append-only rules."
+            )
+        append_run = await axisAppendPlannerAgent.run(
+            user_prompt=prompt,
+            deps=PlannerDeps(workspace_name=run.workspace_id),
+        )
+        addition = append_run.output
+        validation_error = _validate_axis_addition(run, checkpoint_task, addition)
+        if validation_error is None:
+            await axis_sink.publish_ui(
+                "agent_ended",
+                stage="replanning",
+                status="completed",
+                message="Plan updated from completed evidence",
+                data={"phase": "evidence_review", "tasks_added": len(addition.tasks)},
+            )
+            return addition
+
+    raise RuntimeError(
+        "axis append planner could not produce a valid task segment after "
+        f"{AXIS_APPEND_ATTEMPTS} attempts: {validation_error}"
+    )
     
 def _build_message_history_from_prior_runs(workspace_id: str, current_run_id: str | None) -> list[ModelMessage]:
     """Reconstruct a synthetic conversation history from this workspace's prior
@@ -206,13 +492,28 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
                 workspace_id=run.workspace_id,
                 current_run_id=run.query_id,
             )
-        planner_run = await plannerAgent.run(
-            user_prompt=run.goal,
-            message_history=message_history or None,
-            deps=PlannerDeps(workspace_name=run.workspace_id)
+        validation_error: str | None = None
+        for _ in range(3):
+            initial_prompt = run.goal
+            if validation_error:
+                initial_prompt += (
+                    "\n\nYour previous plan violated this internal checkpoint "
+                    f"rule: {validation_error}. Correct the plan. If you use an "
+                    "axis checkpoint, the current task segment must end there."
+                )
+            planner_run = await plannerAgent.run(
+                user_prompt=initial_prompt,
+                message_history=message_history or None,
+                deps=PlannerDeps(workspace_name=run.workspace_id)
+            )
+            validation_error = _initial_axis_plan_error(planner_run.output)
+            if validation_error is None:
+                run.planner_messages = planner_run.all_messages()
+                return planner_run.output
+        raise RuntimeError(
+            "planner could not produce a valid checkpoint segment after "
+            f"3 attempts: {validation_error}"
         )
-        run.planner_messages = planner_run.all_messages()
-        return planner_run.output
 
     current_todo = render_todo(run)
 
@@ -232,9 +533,29 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
         "failed for the stated reason:\n" + "\n".join(failures)
     ) if failures else ""
 
-    replan_prompt = (
+    pending_checkpoints = [
+        task for task in run.plan.tasks
+        if task.status == "pending" and task.axis_checkpoint
+    ]
+    checkpoint_section = (
+        "\n\nInternal checkpoint state (never shown to the user):\n"
+        f"- passes used: {run.axis_checkpoints_used} / {run.axis_checkpoint_budget}\n"
+        + (
+            "\n".join(
+                f"- pending checkpoint {task.id}: {task.axis_focus}"
+                for task in pending_checkpoints
+            )
+            if pending_checkpoints
+            else "- pending checkpoint: none"
+        )
+        + "\nPreserve any pending checkpoint on the same task id. A pending "
+        "checkpoint must remain the final task in the current plan segment."
+    )
+
+    base_replan_prompt = (
         f"Goal: {run.goal}\n\n"
-        f"Current plan state:\n\n{current_todo}{failure_section}\n\n"
+        f"Current plan state:\n\n"
+        f"{current_todo}{failure_section}{checkpoint_section}\n\n"
         "Review the plan above. If executor notes or completed task results "
         "warrant a change, return the revised plan. Otherwise return the "
         "plan unchanged."
@@ -246,20 +567,38 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
         message="Checking whether the plan needs updates",
         data={"phase": "replan", "replans_used": run.replans_used, "replan_budget": run.replan_budget},
     )
-    replan_run = await replanAgent.run(user_prompt=replan_prompt, deps=PlannerDeps(workspace_name=run.workspace_id))
-    decision = replan_run.output
-    # No change wanted, or the model said "change" but gave no tasks -> treat as
-    # a no-op (don't adopt anything, don't spend budget). Assembling the revised
-    # PlanOutput from the flat decision fields ourselves (rather than nesting a
-    # PlanOutput in the schema) avoids the model stringifying a nested object.
-    if not decision.needs_change or not decision.tasks:
-        return None
-    return PlanOutput(
-        goal=decision.goal,
-        tasks=decision.tasks,
-        needs_user_feedback=decision.needs_user_feedback,
-        feedback_question=decision.feedback_question,
-        notes=decision.notes,
+    validation_error: str | None = None
+    for _ in range(3):
+        replan_prompt = base_replan_prompt
+        if validation_error:
+            replan_prompt += (
+                "\n\nYour previous revision violated this internal checkpoint "
+                f"rule: {validation_error}. Correct the complete revised plan."
+            )
+        replan_run = await replanAgent.run(
+            user_prompt=replan_prompt,
+            deps=PlannerDeps(workspace_name=run.workspace_id),
+        )
+        decision = replan_run.output
+        # No change wanted, or the model said "change" but gave no tasks -> treat as
+        # a no-op (don't adopt anything, don't spend budget). Assembling the revised
+        # PlanOutput from the flat decision fields ourselves (rather than nesting a
+        # PlanOutput in the schema) avoids the model stringifying a nested object.
+        if not decision.needs_change or not decision.tasks:
+            return None
+        candidate = PlanOutput(
+            goal=decision.goal,
+            tasks=decision.tasks,
+            needs_user_feedback=decision.needs_user_feedback,
+            feedback_question=decision.feedback_question,
+            notes=decision.notes,
+        )
+        validation_error = _replan_axis_error(run, candidate)
+        if validation_error is None:
+            return candidate
+    raise RuntimeError(
+        "replanner could not preserve a valid checkpoint segment after "
+        f"3 attempts: {validation_error}"
     )
 
 async def publish_todo_artifact(run: QueryRun, sink: EventSink, *, phase: str) -> None:
@@ -758,13 +1097,30 @@ async def create_chat(
             finally:
                 _pending_input.pop(str(query_id), None)
 
-            planner_run = await plannerAgent.run(
-                user_prompt=answer,
-                message_history=thisRun.planner_messages,
-                deps=PlannerDeps(workspace_name=thisRun.workspace_id)
-            )
-            thisRun.plan = planner_run.output
-            thisRun.planner_messages = planner_run.all_messages()
+            validation_error: str | None = None
+            for _ in range(3):
+                feedback_prompt = answer
+                if validation_error:
+                    feedback_prompt += (
+                        "\n\nYour revised plan violated this internal checkpoint "
+                        f"rule: {validation_error}. Correct it and ensure any "
+                        "checkpoint is the final task in the current segment."
+                    )
+                planner_run = await plannerAgent.run(
+                    user_prompt=feedback_prompt,
+                    message_history=thisRun.planner_messages,
+                    deps=PlannerDeps(workspace_name=thisRun.workspace_id)
+                )
+                validation_error = _initial_axis_plan_error(planner_run.output)
+                if validation_error is None:
+                    thisRun.plan = planner_run.output
+                    thisRun.planner_messages = planner_run.all_messages()
+                    break
+            else:
+                raise RuntimeError(
+                    "planner could not produce a valid checkpoint segment after "
+                    f"user feedback: {validation_error}"
+                )
 
             write_todo_atomic(thisRun)
             await publish_todo_artifact(thisRun, sink, phase="planning")
@@ -1026,14 +1382,21 @@ async def create_chat(
                     except Exception as e:
                         print(f"[{task.id}] failed to persist artifacts: {type(e).__name__}: {e}")
 
-                # We can add write_todo_atomic here so that user can see the changes as well, this can be done in future versions
-
-                # ask the planner whether the plan needs revision, but only while
-                # we still have replan budget
-                # persist *and* replan regardless of success/failure — a failure is
-                # exactly when the planner most needs to see the state and decide
-                # whether to revise.
-                if thisRun.replans_used < thisRun.replan_budget:
+                # A successful planner-selected checkpoint uses the hidden
+                # evidence critic and an append-only planner. Ordinary tasks
+                # retain the existing full-plan replan path for failures and
+                # executor surprises.
+                axis_segment_added = False
+                if (
+                    task.status == "completed"
+                    and task.axis_checkpoint
+                    and thisRun.axis_checkpoints_used < thisRun.axis_checkpoint_budget
+                ):
+                    addition = await run_axis_checkpoint(thisRun, task, sink)
+                    _append_axis_tasks(thisRun, addition)
+                    thisRun.axis_checkpoints_used += 1
+                    axis_segment_added = True
+                elif thisRun.replans_used < thisRun.replan_budget:
                     new_plan = await planner(thisRun, sink)
                     if new_plan is not None:
                         thisRun.plan = _merge_plan(thisRun.plan, new_plan)
@@ -1041,7 +1404,19 @@ async def create_chat(
 
                 # always rewrite todo.md so status, produced, and any replan land on disk
                 write_todo_atomic(thisRun)
-                await publish_todo_artifact(thisRun, sink, phase="replanning" if thisRun.replans_used else "planning")
+                await publish_todo_artifact(
+                    thisRun,
+                    sink,
+                    phase="replanning"
+                    if thisRun.replans_used or axis_segment_added
+                    else "planning",
+                )
+
+                if axis_segment_added:
+                    # `ready` was computed from the old graph. Restart task
+                    # selection so the appended dependencies take effect before
+                    # any stale ready task can run.
+                    break
     finally:
 
         # Increment query_counter by 1
