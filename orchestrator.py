@@ -1,8 +1,17 @@
 import os
 from dotenv import load_dotenv
 from pydantic_ai import Agent, RunContext, ToolOutput
-from formats_pydantic import PlanOutput, ReplanDecision
-from system_prompts import planner_system_prompt
+from formats_pydantic import (
+    AxisPlanAddition,
+    AxisReasoningOutput,
+    PlanOutput,
+    ReplanDecision,
+)
+from system_prompts import (
+    axis_append_planner_system_prompt,
+    axis_reasoning_system_prompt,
+    planner_system_prompt,
+)
 from pydantic_ai.models.openai import OpenAIChatModelSettings
 from qwen_compat import QwenChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -47,6 +56,27 @@ replanAgent = Agent(
     model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
 )
 
+# Hidden evidence critic. Its output is intentionally one detailed string: the
+# normal planner consumes the critique, while users only see appended tasks.
+axisAgent = Agent(
+    model,
+    system_prompt=axis_reasoning_system_prompt,
+    retries=3,
+    output_type=ToolOutput(AxisReasoningOutput, name="submit_axis_reasoning"),
+    model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": True}),
+)
+
+# A separate planner output keeps checkpoint replanning append-only by schema.
+# It cannot accidentally regenerate or modify the existing todo.
+axisAppendPlannerAgent = Agent(
+    model,
+    system_prompt=axis_append_planner_system_prompt,
+    retries=3,
+    deps_type=PlannerDeps,
+    output_type=ToolOutput(AxisPlanAddition, name="append_plan_tasks"),
+    model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
+)
+
 
 def _register_lookup_tools(agent: Agent) -> None:
     """Both planning agents need the same name→id lookup tools."""
@@ -64,3 +94,4 @@ def _register_lookup_tools(agent: Agent) -> None:
 
 _register_lookup_tools(plannerAgent)
 _register_lookup_tools(replanAgent)
+_register_lookup_tools(axisAppendPlannerAgent)

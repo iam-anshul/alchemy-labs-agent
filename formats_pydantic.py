@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Literal
 from datetime import datetime
 from uuid import UUID
@@ -30,6 +30,61 @@ class TaskSpec(BaseModel):
         )
     query_for_human_in_the_loop: str | None = Field(default=None, description="This field is to be populated by planner if human_in_the_loop field is" \
     "'True' then planner needs to populate this field prompting the user to ask the feedback or confirmation or validation query the planner wants to ask.")
+    axis_checkpoint: bool = Field(
+        default=False,
+        exclude=True,
+        description=(
+            "Internal evidence checkpoint selected by the planner. After this "
+            "task completes successfully, the hidden axis reasoner examines its "
+            "evidence and an append-only planner adds the next task segment."
+        ),
+    )
+    axis_focus: str | None = Field(
+        default=None,
+        exclude=True,
+        description=(
+            "Required when axis_checkpoint=True. Describe the downstream "
+            "decision that evidence may change, tentative domains to inspect, "
+            "and findings that would require additional analysis."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_axis_checkpoint(self):
+        if self.axis_checkpoint and not (self.axis_focus or "").strip():
+            raise ValueError("axis_focus is required when axis_checkpoint=True")
+        if not self.axis_checkpoint:
+            self.axis_focus = None
+        return self
+
+
+class AxisReasoningOutput(BaseModel):
+    reasoning: str = Field(
+        min_length=1,
+        description=(
+            "A detailed evidence-grounded planning critique explaining the "
+            "material reasoning axes, why they matter, plausible branches, "
+            "interactions, contradictions, and information gaps. It must guide "
+            "the planner without creating tasks or answering the user."
+        ),
+    )
+
+
+class AxisPlanAddition(BaseModel):
+    tasks: list[TaskSpec] = Field(
+        min_length=1,
+        description=(
+            "Only NEW tasks to append after the completed checkpoint. Never "
+            "repeat, replace, remove, or rewrite an existing task."
+        ),
+    )
+    notes: str | None = Field(
+        default=None,
+        description=(
+            "Short internal explanation of what the axis critique caused the "
+            "planner to add. Do not mention hidden reasoning mechanics."
+        ),
+    )
 
 class PlanOutput(BaseModel):
     goal: str = Field(default="", description="The distilled intent the planner reasons about. This is what the planner tries to achieve through its tasks.")
@@ -81,6 +136,8 @@ class QueryRun(BaseModel): # the name should be changed to QueryRun in the upcom
     started_at: datetime
     replans_used: int = 0
     replan_budget: int = 3  # max number of times the planner may revise the plan
+    axis_checkpoints_used: int = 0
+    axis_checkpoint_budget: int = 2
     plan: PlanOutput | None = None
     # Persistent identity for chat-style state. workspace_id groups multiple
     # runs into one conversation; run_id identifies this single turn. Both
@@ -95,4 +152,3 @@ class QueryRun(BaseModel): # the name should be changed to QueryRun in the upcom
 class ChatAcceptedResponse(BaseModel):
     query_id: UUID
     stream_url: str
-    
