@@ -146,6 +146,26 @@ def run_command(ctx: RunContext[OfficeDeps], command: str) -> str:
     return f"ERROR (exit {result.returncode}):\nstderr:\n{stderr}\nstdout:\n{stdout}"
 
 
+# officecli subcommands that mutate the document on disk. After one of these
+# runs, the file's edits live only in officecli's in-memory "resident" process
+# (it keeps docs open in the background for speed) and are NOT flushed to disk
+# until the resident is closed. If the agent never closes it, the file on disk
+# stays as it was at `create` time — a blank shell that still has bytes, so it
+# passes the non-empty submission check while opening completely empty. We flush
+# after every mutating command so the disk file always reflects the edits.
+_OFFICECLI_MUTATING_COMMANDS = {
+    "create", "add", "set", "delete", "batch", "import", "merge", "move",
+}
+
+
+def _run_officecli(workspace: Path, cmd_args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [_OFFICECLI_PATH, *cmd_args],
+        capture_output=True,
+        cwd=workspace,
+    )
+
+
 @theOfficeAgent.tool(retries=1)
 def officecli(ctx: RunContext[OfficeDeps], args: list[str]) -> str:
     """Invoke the OfficeCLI binary for purpose-built read/edit of .docx,
@@ -166,15 +186,21 @@ def officecli(ctx: RunContext[OfficeDeps], args: list[str]) -> str:
     cmd_args = list(args)
     if not cmd_args or cmd_args[0] not in plain_text_commands:
         cmd_args.append("--json")
-    result = subprocess.run(
-        [_OFFICECLI_PATH, *cmd_args],
-        capture_output=True,
-        cwd=ctx.deps.workspace,
-    )
+    result = _run_officecli(ctx.deps.workspace, cmd_args)
     stdout = result.stdout.decode(errors="replace")
     stderr = result.stderr.decode(errors="replace")
     if result.returncode != 0:
         return f"ERROR (exit {result.returncode}):\nstderr:\n{stderr}\nstdout:\n{stdout}"
+
+    # Flush the resident to disk after a successful mutating command. The file
+    # path is the second positional token (e.g. ['add', 'outputs/x.pptx', ...]);
+    # `close` is a cheap no-op (exit 0) when no resident is running for it, so
+    # this is safe to call unconditionally. We swallow its output — it's
+    # bookkeeping the agent doesn't need to see.
+    if args and args[0] in _OFFICECLI_MUTATING_COMMANDS and len(args) >= 2:
+        target = args[1]
+        _run_officecli(ctx.deps.workspace, ["close", target, "--json"])
+
     if not stdout.strip():
         return "(no output)"
     # Pretty-print JSON so the agent sees structured data cleanly; fall back

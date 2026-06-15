@@ -1,3 +1,4 @@
+import logfire
 from browser_use import Agent, Tools, Browser, ChatOpenAI
 from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
 from browser_use.llm.openai.serializer import OpenAIMessageSerializer
@@ -291,11 +292,21 @@ class BrowserExecutor:
             # max_steps is a run() arg in browser-use, NOT a constructor arg.
             # Passing it to Agent(...) is silently ignored and run() falls back
             # to its default of 500. Pass it here so the cap is actually enforced.
-            history = await browser_agent.run(
+            # browser-use isn't pydantic-ai, so it gets no auto-instrumentation;
+            # this explicit span makes the browser agent visible in Logfire (its
+            # LLM HTTP calls are still captured by instrument_httpx).
+            with logfire.span(
+                "browser_agent run",
+                task_id=task_id,
+                attempt=attempt,
+                query=query,
                 max_steps=self.max_steps,
-                on_step_start=self._make_step_hook(sink, "started"),
-                on_step_end=self._make_step_hook(sink, "progress"),
-            )
+            ):
+                history = await browser_agent.run(
+                    max_steps=self.max_steps,
+                    on_step_start=self._make_step_hook(sink, "started"),
+                    on_step_end=self._make_step_hook(sink, "progress"),
+                )
         except Exception as e:
             await sink.publish_ui(
                 "agent_ended",

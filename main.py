@@ -1,3 +1,7 @@
+# Import first so Logfire is configured and pydantic-ai is instrumented before
+# any agent modules (orchestrator, agent, report, office_agent) are loaded.
+import observability  # noqa: F401
+
 import os
 import uuid
 from pathlib import Path

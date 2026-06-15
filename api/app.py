@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# Import first so Logfire is configured and pydantic-ai is instrumented before
+# any agent modules (imported transitively via the routes) are loaded.
+import observability  # noqa: F401
+
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -53,6 +57,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Doc Reasoner API", lifespan=lifespan)
+
+# Trace incoming requests so each agent run is nested under the API call that
+# triggered it. No-op if Logfire wasn't configured (no token).
+observability.instrument_fastapi_app(app)
 
 app.add_middleware(
     CORSMiddleware,
