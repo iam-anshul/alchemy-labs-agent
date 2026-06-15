@@ -32,6 +32,14 @@ SUPERTOKENS_CONNECTION_STRING = os.getenv("SUPERTOKENS_CONNECTION_STRING")
 SUPERTOKENS_API_KEY = os.getenv("SUPERTOKENS_API_KEY")
 SUPERTOKENS_URI=os.getenv("SUPERTOKENS_URI")
 
+# Domains the browser actually uses to reach the app. Must match the address in
+# the address bar or session cookies won't be sent. Override per deployment.
+API_DOMAIN = os.getenv("API_DOMAIN", "http://localhost:8000")
+WEBSITE_DOMAIN = os.getenv("WEBSITE_DOMAIN", "http://localhost:8000")
+# Cookies are sent only over HTTPS when True. Set False for plain-HTTP hosting
+# (LAN/internal only — insecure on the public internet). Defaults to secure.
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
+
 security = HTTPBasic()
 
 
@@ -116,15 +124,15 @@ async def get_documentation(username: str = Depends(get_current_user)):
 init(
     app_info = InputAppInfo(
         app_name="alchemy labs server",
-        api_domain="http://localhost:8000",
-        website_domain="http://localhost:8000"
+        api_domain=API_DOMAIN,
+        website_domain=WEBSITE_DOMAIN
     ),
     supertokens_config = SupertokensConfig(
         connection_uri=SUPERTOKENS_URI,
         api_key=SUPERTOKENS_API_KEY
     ),
     framework="fastapi",
-    recipe_list=[session.init(), emailpassword.init()],
+    recipe_list=[session.init(cookie_secure=COOKIE_SECURE), emailpassword.init()],
     mode="asgi"
 )
 

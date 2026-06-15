@@ -1,6 +1,9 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+// In Docker the backend is a separate service ("backend"); locally it's localhost.
+const backendTarget = process.env.VITE_BACKEND_URL ?? "http://localhost:8000";
+
 export default defineConfig({
   plugins: [react()],
   build: {
@@ -17,11 +20,13 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/auth": "http://localhost:8000",
-      "/chat": "http://localhost:8000",
-      "/workspace": "http://localhost:8000",
-      "/v1": "http://localhost:8000",
-      "/health": "http://localhost:8000",
+      // SuperTokens API only — must NOT match the website UI path (/auth-ui),
+      // which React Router serves. Negative lookahead excludes /auth-ui*.
+      "^/auth(?!-ui)": backendTarget,
+      "/chat": backendTarget,
+      "/workspace": backendTarget,
+      "/v1": backendTarget,
+      "/health": backendTarget,
     },
   },
 });
