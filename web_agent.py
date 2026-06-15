@@ -13,7 +13,7 @@ import asyncio
 import hashlib
 import re
 
-from exa_py import Exa
+from exa_rotation import exa_client
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -23,9 +23,8 @@ load_dotenv()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL")
-EXA_API_KEY = os.getenv("EXA_API_KEY")
-
-exa_client = Exa(api_key=EXA_API_KEY)
+# Exa keys are loaded and rotated by exa_rotation.exa_client (round-robin across
+# all EXA_API_KEY* values in .env, with failover on rate-limit/auth errors).
 
 @dataclass
 class WebDeps:
