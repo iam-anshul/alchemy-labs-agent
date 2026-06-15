@@ -2,7 +2,7 @@ from db import utils as db_utils
 from fastapi import Depends, APIRouter, HTTPException, Response
 from urllib.parse import quote
 import mimetypes
-from api.routes.chat import make_workspace
+from api.routes.chat import make_workspace, workspace_dir
 from db import SessionLocal
 from supertokens_python.recipe.session.framework.fastapi import verify_session
 from supertokens_python.recipe.session import SessionContainer
@@ -53,13 +53,14 @@ def _to_output(workspace_id: str, art: dict) -> WorkspaceOutput:
 
 @workspace_router.post("/create_workspace")
 async def register__workspace(workspace_name: str, session: SessionContainer = Depends(verify_session())) -> str:
+    user_id = session.get_user_id()
     with SessionLocal() as db:
         db_utils.create_workspace(
             db,
             workspace_id=workspace_name,
-            user_id=session.get_user_id()
+            user_id=user_id
         )
-    make_workspace(f"{Path.cwd()}/file_system_root/{workspace_name}")
+    make_workspace(workspace_dir(user_id, workspace_name))
     return workspace_name
 
 @workspace_router.delete("/delete_workspace")
@@ -85,7 +86,7 @@ async def delete_workspace(
     # Best-effort filesystem cleanup. ignore_errors swallows a missing dir (the
     # workspace may have had no runs yet) and partial-permission failures; the
     # DB is already authoritative at this point.
-    workspace_path = Path(f"{Path.cwd()}/file_system_root/{workspace_name}")
+    workspace_path = workspace_dir(user_id, workspace_name)
     shutil.rmtree(workspace_path, ignore_errors=True)
 
     return workspace_name

@@ -56,6 +56,20 @@ def make_workspace(workspace_path):
     return workspace_path
 
 
+def workspace_dir(user_id: str, workspace_name: str) -> Path:
+    """Absolute path to a workspace's directory on disk.
+
+    Workspaces are namespaced under the owning user's id so different users'
+    workspaces never share a parent folder:
+
+        file_system_root/<user_id>/<workspace_name>
+
+    This is the single source of truth for that layout — create, delete, and
+    run all derive their paths from here so they can never drift apart.
+    """
+    return Path.cwd() / "file_system_root" / str(user_id) / workspace_name
+
+
 def _read_artifacts(subdir: Path, produced: list[str], task_id: str) -> list[dict]:
     """Read a completed task's produced files into persistable artifact dicts.
     Each: {rel_path, content_b64, bytes, task_id}. Skips files that don't exist
@@ -639,8 +653,8 @@ async def create_chat(
 
     #checking in local filesystem for the workspace
 
-    absolute_workspace_path = f"{Path.cwd()}/file_system_root/{workspace_name}"
-    workspace_path = Path(f"{Path.cwd()}/file_system_root/{workspace_name}")
+    workspace_path = workspace_dir(user_id, workspace_name)
+    absolute_workspace_path = str(workspace_path)
 
     if not workspace_path.exists():
         # check in the database if the workspace exists
