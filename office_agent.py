@@ -13,9 +13,11 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, ModelRetry, RunContext, ToolOutput
 from pydantic_ai.models.openai import OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.usage import UsageLimits
 from qwen_compat import QwenChatModel
 
 from browser_agent import ExecutorResult
+from config import get_settings
 from system_prompts import office_system_prompt
 
 # Resolved once at import so every officecli call doesn't re-walk PATH.
@@ -211,6 +213,51 @@ def officecli(ctx: RunContext[OfficeDeps], args: list[str]) -> str:
         return stdout
 
 
+# Office file extensions whose "non-empty" cannot be judged by byte size: a
+# freshly-`create`d .pptx/.docx/.xlsx is a valid ZIP of boilerplate XML and is
+# several KB on disk while containing zero slides/paragraphs/cells. We probe
+# their real content with `officecli view <file> stats` instead.
+_OFFICE_CONTENT_EXTS = {".pptx", ".docx", ".xlsx"}
+
+
+def _office_content_error(workspace: Path, rel_path: Path) -> str | None:
+    """Return a user-facing error if an Office file is structurally empty, else
+    None. Uses `officecli view <file> stats`: for pptx/docx an empty file has
+    words==0, for xlsx totalCells==0. Returns None (i.e. "assume OK") if
+    officecli is unavailable or stats can't be parsed — we don't want a probe
+    failure to block an otherwise-valid submission."""
+    if _OFFICECLI_PATH is None:
+        return None
+    result = _run_officecli(workspace, ["view", str(rel_path), "stats", "--json"])
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout.decode(errors="replace")).get("data", {})
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+    suffix = rel_path.suffix.lower()
+    if suffix == ".xlsx":
+        if data.get("totalCells", 1) == 0:
+            return (
+                f"file {rel_path} is an empty workbook (0 cells) — the officecli "
+                f"edits did not land. Re-add the data and verify with "
+                f"`officecli view {rel_path} stats` before submitting."
+            )
+    else:  # .pptx / .docx
+        slides = data.get("slides")
+        if data.get("words", 1) == 0 and (slides is None or slides == 0):
+            kind = "presentation" if suffix == ".pptx" else "document"
+            return (
+                f"file {rel_path} is an empty {kind} (no text content) — the "
+                f"officecli edits did not land (a common cause is a `batch` whose "
+                f"ops all failed). Re-add the content with individual "
+                f"`officecli add` commands and verify with "
+                f"`officecli view {rel_path} stats` before submitting."
+            )
+    return None
+
+
 def _validate_submission(
     workspace: Path,
     submission: OfficeSubmission,
@@ -240,6 +287,13 @@ def _validate_submission(
                 notes="",
                 error=f"claimed file {path} is empty",
             )
+        # Byte size isn't enough for Office files — a blank deck/doc/workbook is
+        # still several KB. Probe real content so a silently-empty artifact is
+        # rejected (→ ModelRetry) instead of shipped.
+        if p.suffix.lower() in _OFFICE_CONTENT_EXTS:
+            content_error = _office_content_error(workspace, p)
+            if content_error:
+                return ExecutorResult(produced=[], notes="", error=content_error)
         normalized.append(str(p))
 
     return ExecutorResult(produced=normalized, notes=submission.notes)
@@ -292,8 +346,86 @@ def validate_office_submission(
     return OfficeSubmission(produced=result.produced, notes=result.notes)
 
 
-def _build_task_prompt(query: str, expects: str, dep_files: list[str]) -> str:
+# Map an artifact type (inferred from the EXPECTED OUTPUT text) to the OfficeCLI
+# skill we force-load for that run. Order matters: more specific extensions win.
+_SKILL_FOR_EXT = {
+    ".pptx": "pitch-deck",  # the pptx baseline most decks want; covers generic pptx too
+    ".xlsx": "data-dashboard",
+    ".docx": "academic-paper",
+}
+
+
+def _detect_office_ext(expects: str) -> str | None:
+    """Pick the dominant Office extension named in the EXPECTED OUTPUT text."""
+    lowered = expects.lower()
+    for ext in (".pptx", ".xlsx", ".docx"):
+        if ext in lowered:
+            return ext
+    return None
+
+
+def _load_skill_text(skill: str) -> str | None:
+    """Fetch a skill's SKILL.md via officecli, or None if unavailable."""
+    if _OFFICECLI_PATH is None:
+        return None
+    result = subprocess.run(
+        [_OFFICECLI_PATH, "load_skill", skill],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    text = result.stdout.decode(errors="replace").strip()
+    return text or None
+
+
+# Verified officecli recipe for building a .pptx that ACTUALLY persists text AND
+# stays within the per-run request budget. Use `batch` (one request per slide-ish
+# group), NOT one `add` call per shape — a 15-slide deck built one shape at a time
+# blows past the request_limit and the run is killed mid-build. The batch op
+# schema below is the one the loaded SKILL.md uses and is grep-verified to work:
+# top-level command/parent/type, with everything else (text + geometry) under
+# `props`. Each text shape needs explicit geometry (x/y/width/height).
+_PPTX_RECIPE = """VERIFIED PPTX RECIPE — follow this exactly; it is known to work
+and to stay within your request budget:
+1. Create the deck: officecli(['create', 'outputs/<name>.pptx'])
+2. Build slides with `batch` — ONE batch call per slide (or per few slides), NOT
+   one officecli call per shape. Building a 15-slide deck with an `add` call per
+   shape will exceed the run's request limit and the build will be killed before
+   it finishes. Write the ops JSON with write_file, then run the batch:
+     officecli(['batch', 'outputs/<name>.pptx', '--input', 'outputs/ops_slide1.json'])
+3. Batch op schema (verified — this exact shape works): command/parent/type at
+   the TOP level, and text + geometry under `props`. Every text shape needs
+   explicit geometry (x/y/width/height) or it can render empty:
+     [
+       {"command":"add","parent":"/","type":"slide","props":{"layout":"blank","background":"1E2761"}},
+       {"command":"add","parent":"/slide[1]","type":"shape",
+        "props":{"text":"Your Title","x":"2cm","y":"5cm","width":"29cm","height":"3cm",
+                 "font":"Georgia","size":"44","bold":"true","color":"FFFFFF","align":"center"}}
+     ]
+   Common mistakes that make ops fail (and leave the file empty): putting x/y/
+   width/height at the TOP level instead of under `props`; omitting `type`;
+   using `prop` instead of `props`. If batch returns success=false, read the
+   per-op error and fix the JSON — do NOT fall back to one add-per-shape.
+4. VERIFY before submitting: officecli(['view', 'outputs/<name>.pptx', 'stats'])
+   — confirm `slides` and `words` are both > 0. If `words` is 0 the text did not
+   land; fix it before you submit. The submission check will reject an empty deck.
+"""
+
+
+def _build_task_prompt(
+    query: str,
+    expects: str,
+    dep_files: list[str],
+    skill_text: str | None = None,
+) -> str:
     dep_section = "\n".join(f" - {p}" for p in dep_files) if dep_files else "none"
+    ext = _detect_office_ext(expects)
+    recipe_section = _PPTX_RECIPE if ext == ".pptx" else ""
+    skill_section = (
+        f"\nLOADED OFFICECLI SKILL (design + command conventions — follow it):\n{skill_text}\n"
+        if skill_text
+        else ""
+    )
     return f"""You are an office sub-agent. Complete the task below and submit your result.
 
 QUERY:
@@ -316,7 +448,7 @@ python-docx, or python-pptx to do these operations — those libraries are
 present in the environment but using them for Office files violates this
 contract. `run_command` + python is reserved for pandas analysis, matplotlib
 charts, and CSV/JSON wrangling that officecli cannot do.
-
+{recipe_section}{skill_section}
 WHEN DONE:
 Return the terminal `submit` output with:
   - produced: list of relative paths you wrote
@@ -325,7 +457,8 @@ Return the terminal `submit` output with:
     Do NOT recap what you did and do NOT claim to have used a tool you did
     not actually call — the planner can see the produced files.
 
-Do not submit until you have written all expected files.
+Do not submit until you have written all expected files and verified each
+Office file is non-empty with `officecli view <file> stats`.
 """
 
 
@@ -341,10 +474,26 @@ async def run_office_executor(
 
     Plugs into dispatch_executor_agent in main.py for the 'office' branch."""
     deps = OfficeDeps(workspace=workspace.resolve(), sink=sink.child(agent_type="office"))
-    task_prompt = _build_task_prompt(query, expects, dep_files)
+
+    # Force-load the matching OfficeCLI skill and inject it into the prompt. The
+    # system prompt tells the agent to `load_skill` first, but in practice it
+    # often skips that step and then guesses wrong command forms (a major cause
+    # of malformed/empty artifacts). Loading it here makes the verified design +
+    # command conventions unconditionally present in the agent's context.
+    ext = _detect_office_ext(expects)
+    skill_text = _load_skill_text(_SKILL_FOR_EXT[ext]) if ext else None
+    task_prompt = _build_task_prompt(query, expects, dep_files, skill_text=skill_text)
+
+    # Multi-slide decks need many tool calls; the pydantic-ai default request
+    # limit of 50 kills large builds mid-way. Use the configured office budget.
+    usage_limits = UsageLimits(
+        request_limit=get_settings().agent_office_request_limit
+    )
 
     try:
-        run_result = await theOfficeAgent.run(user_prompt=task_prompt, deps=deps)
+        run_result = await theOfficeAgent.run(
+            user_prompt=task_prompt, deps=deps, usage_limits=usage_limits
+        )
     except Exception as e:
         return ExecutorResult(
             produced=[],

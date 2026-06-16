@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     agent_router_request_limit: int = 60
     agent_excel_request_limit: int = 40
     agent_answer_request_limit: int = 10
+    # Office agent: building a multi-slide deck takes many officecli tool calls
+    # (one per batch group + verification), so the pydantic-ai default of 50 is
+    # too low and kills large decks mid-build. Give it generous headroom.
+    agent_office_request_limit: int = 200
     # Max router → excel → answer iterations per query
     agent_max_hops: int = 3
     # Max follow-up questions the answer agent can queue per hop
