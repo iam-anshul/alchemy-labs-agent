@@ -836,7 +836,7 @@ async def dispatch_executor_agent(
     attempt: int | None = None,
 ) -> ExecutorResult:
     task_sink = sink.child(task_id=task_spec.id, agent_type=task_spec.agent, attempt=attempt)
-    # Planner should have the tools to list document and find the doc id with its name
+    # Planner sees ready document ids in prompt context; execution routing happens here.
     match task_spec.agent:
         case "browser":
             if _browser_task_can_use_web_search(task_spec):
