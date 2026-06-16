@@ -16,7 +16,7 @@ from pydantic_ai.models.openai import OpenAIChatModelSettings
 from qwen_compat import QwenChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from dataclasses import dataclass
-from db.utils import get_docID_by_name, get_reportID_by_name
+from db.utils import get_reportID_by_name
 from db import SessionLocal
 #from source.models import agentDeps
 
@@ -79,12 +79,11 @@ axisAppendPlannerAgent = Agent(
 
 
 def _register_lookup_tools(agent: Agent) -> None:
-    """Both planning agents need the same name→id lookup tools."""
+    """Planning agents only need report lookup tools.
 
-    @agent.tool(retries=1)
-    def fetch_doc_ids(ctx: RunContext[PlannerDeps], doc_name: str) -> list[str]:
-        with SessionLocal() as db:
-            return get_docID_by_name(db, ctx.deps.workspace_name, doc_name)
+    Ready document ids are injected into the planner prompt as workspace
+    context, so there is no document lookup tool for the planner to call.
+    """
 
     @agent.tool(retries=1)
     def fetch_report_ids(ctx: RunContext[PlannerDeps], report_name: str) -> list[str]:

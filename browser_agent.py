@@ -308,17 +308,18 @@ class BrowserExecutor:
                     on_step_end=self._make_step_hook(sink, "progress"),
                 )
         except Exception as e:
+            error = self._format_run_exception(e)
             await sink.publish_ui(
                 "agent_ended",
                 stage="browsing",
                 status="failed",
                 message="Browser agent failed",
-                data={"error_class": type(e).__name__, "error": str(e)},
+                data={"error_class": type(e).__name__, "error": error},
             )
             return ExecutorResult(
                 produced=[],
                 notes="",
-                error=f"Agent loop failed: {type(e).__name__}: {e}",
+                error=error,
             )
         finally:
             await browser.kill()
@@ -545,6 +546,18 @@ class BrowserExecutor:
             if isinstance(value, str):
                 return value.removeprefix("data:image/png;base64,")
         return None
+
+    @staticmethod
+    def _format_run_exception(e: Exception) -> str:
+        if isinstance(e, FileNotFoundError):
+            return (
+                "Browser launch failed because no local browser binary was available "
+                "and browser-use could not run Playwright's browser installer. "
+                "Install Chromium in the runtime image, e.g. `python -m playwright "
+                "install --with-deps chromium`. Original error: "
+                f"{type(e).__name__}: {e}"
+            )
+        return f"Agent loop failed: {type(e).__name__}: {e}"
 
     @staticmethod
     def _failure_detail(history) -> str:

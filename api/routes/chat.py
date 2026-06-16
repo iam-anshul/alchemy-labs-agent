@@ -1,4 +1,5 @@
 import os
+import re
 import base64
 import hashlib
 import traceback
@@ -64,6 +65,8 @@ USER_FEEDBACK_TIMEOUT_SECONDS = 300
 AXIS_EVIDENCE_FILE_CHAR_LIMIT = 20_000
 AXIS_EVIDENCE_TOTAL_CHAR_LIMIT = 80_000
 AXIS_APPEND_ATTEMPTS = 3
+PLANNER_DOC_SUMMARY_CHAR_LIMIT = 1_200
+PLANNER_DOC_INVENTORY_TOTAL_CHAR_LIMIT = 60_000
 AXIS_READABLE_SUFFIXES = {
     ".csv",
     ".htm",
@@ -75,6 +78,33 @@ AXIS_READABLE_SUFFIXES = {
     ".yaml",
     ".yml",
 }
+
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_BROWSER_ONLY_RE = re.compile(
+    r"\b("
+    r"click|login|log in|sign in|fill|form|submit|scroll|javascript|js-rendered|"
+    r"portal|captcha|download|pdf|xlsx|xls|docx|pptx|binary"
+    r")\b",
+    re.IGNORECASE,
+)
+_STATIC_WEB_RE = re.compile(
+    r"\b("
+    r"research|extract|summari[sz]e|find|read|visible information|company information|"
+    r"navigate to|visit"
+    r")\b",
+    re.IGNORECASE,
+)
+_TEXT_OUTPUT_RE = re.compile(r"outputs/[^ \n\t]+[.](md|txt|csv|json|html?)\b", re.IGNORECASE)
+
+
+def _browser_task_can_use_web_search(task_spec: TaskSpec) -> bool:
+    """Catch planner over-routing: static webpage reading belongs to web_search."""
+    text = f"{task_spec.query}\n{task_spec.expects}"
+    if not _URL_RE.search(text):
+        return False
+    if _BROWSER_ONLY_RE.search(text):
+        return False
+    return bool(_STATIC_WEB_RE.search(text) or _TEXT_OUTPUT_RE.search(text))
 
 _pending_input: dict[str, asyncio.Future] = {}
 
@@ -305,6 +335,73 @@ def _append_axis_tasks(run: QueryRun, addition: AxisPlanAddition) -> None:
         run.plan.notes = "\n".join(part for part in (previous, addition.notes.strip()) if part)
 
 
+def _truncate_planner_text(text: str | None, limit: int) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + " [truncated]"
+
+
+def _format_available_docs_for_planner(workspace_id: str) -> str:
+    """Render ready workspace documents directly into planner context."""
+    try:
+        with SessionLocal() as db:
+            docs = db_utils.list_ready_docs_for_planner(db, workspace_id)
+    except Exception as e:
+        return (
+            "Available workspace documents: unavailable because the document "
+            f"inventory query failed ({type(e).__name__}: {e})."
+        )
+
+    if not docs:
+        return (
+            "Available workspace documents: none are fully ingested and ready. "
+            "Queued, processing, or failed documents are omitted because the "
+            "document_answering agent cannot use them yet."
+        )
+
+    lines = [
+        "Available workspace documents (ready only; queued/processing/failed docs are omitted):",
+        "Use these exact doc_id values in doc_deps.doc_ids when the user names a specific ready document.",
+        "Leave doc_deps.doc_ids=None for general questions over all ready documents.",
+        "Each top_level_summary is the document-level root summary produced at ingestion time.",
+    ]
+    summary_budget = PLANNER_DOC_INVENTORY_TOTAL_CHAR_LIMIT
+
+    for index, doc in enumerate(docs, start=1):
+        source_name = Path(doc.source_path).name if doc.source_path else "(unknown source)"
+        created_at = doc.created_at.isoformat() if doc.created_at else "(unknown)"
+        if summary_budget > 0:
+            summary_limit = min(PLANNER_DOC_SUMMARY_CHAR_LIMIT, summary_budget)
+            summary = _truncate_planner_text(doc.doc_summary, summary_limit)
+            summary_budget -= len(summary)
+        elif doc.doc_summary:
+            summary = "(summary omitted because the planner inventory summary budget was reached)"
+        else:
+            summary = ""
+        entry = (
+            f"{index}. doc_id={doc.doc_id}\n"
+            f"   title={doc.title or '(untitled)'}\n"
+            f"   source_file={source_name}\n"
+            f"   pages={doc.n_pages if doc.n_pages is not None else 'unknown'}; "
+            f"tables={doc.n_tables if doc.n_tables is not None else 'unknown'}; "
+            f"created_at={created_at}\n"
+            f"   top_level_summary={summary or '(no summary available)'}"
+        )
+        lines.append(entry)
+
+    return "\n".join(lines)
+
+
+def _with_planner_workspace_context(workspace_id: str, prompt: str) -> str:
+    return (
+        f"{_format_available_docs_for_planner(workspace_id)}\n\n"
+        f"Planner request:\n{prompt}"
+    )
+
+
 def _initial_axis_plan_error(plan: PlanOutput) -> str | None:
     checkpoint_positions = [
         index for index, task in enumerate(plan.tasks) if task.axis_checkpoint
@@ -378,6 +475,7 @@ async def run_axis_checkpoint(
     )
     base_append_prompt = (
         f"USER GOAL:\n{run.goal}\n\n"
+        f"{_format_available_docs_for_planner(run.workspace_id)}\n\n"
         f"CURRENT PLAN:\n{render_todo(run)}\n\n"
         f"COMPLETED CHECKPOINT:\n"
         f"id: {checkpoint_task.id}\n"
@@ -488,7 +586,7 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
                     "axis checkpoint, the current task segment must end there."
                 )
             planner_run = await plannerAgent.run(
-                user_prompt=initial_prompt,
+                user_prompt=_with_planner_workspace_context(run.workspace_id, initial_prompt),
                 message_history=message_history or None,
                 deps=PlannerDeps(workspace_name=run.workspace_id)
             )
@@ -540,6 +638,7 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
 
     base_replan_prompt = (
         f"Goal: {run.goal}\n\n"
+        f"{_format_available_docs_for_planner(run.workspace_id)}\n\n"
         f"Current plan state:\n\n"
         f"{current_todo}{failure_section}{checkpoint_section}\n\n"
         "Review the plan above. If executor notes or completed task results "
@@ -726,6 +825,45 @@ async def dispatch_executor_agent(
     # Planner should have the tools to list document and find the doc id with its name
     match task_spec.agent:
         case "browser":
+            if _browser_task_can_use_web_search(task_spec):
+                await task_sink.publish_ui(
+                    "agent_progress",
+                    stage="routing",
+                    status="progress",
+                    message="Using web search for static webpage research",
+                    data={
+                        "original_agent": "browser",
+                        "effective_agent": "web_search",
+                        "reason": "task reads public web text and does not require interaction or binary download",
+                    },
+                )
+                await task_sink.publish_ui(
+                    "agent_started",
+                    stage="web_search",
+                    status="started",
+                    message="Web search agent started",
+                    data={"expects": task_spec.expects, "dep_files": dep_files},
+                )
+                web_result = await run_web_executor(
+                    workspace_subdir_path=subdir_path,
+                    query=task_spec.query,
+                    expects=task_spec.expects,
+                    dep_files=dep_files,
+                    page_cache=page_cache,
+                    sink=task_sink,
+                )
+                await task_sink.publish_ui(
+                    "agent_ended",
+                    stage="done",
+                    status="failed" if web_result.error else "completed",
+                    message="Web search agent finished" if not web_result.error else "Web search agent failed",
+                    data={
+                        "produced": web_result.produced,
+                        "notes": web_result.notes,
+                        "error": web_result.error,
+                    },
+                )
+                return web_result
             browser = BrowserExecutor( workspace=subdir_path, model=MODEL, headless=True, max_failures=8)
             browser_result = await browser.run(
                 query=task_spec.query,
@@ -1093,7 +1231,7 @@ async def create_chat(
                         "checkpoint is the final task in the current segment."
                     )
                 planner_run = await plannerAgent.run(
-                    user_prompt=feedback_prompt,
+                    user_prompt=_with_planner_workspace_context(thisRun.workspace_id, feedback_prompt),
                     message_history=thisRun.planner_messages,
                     deps=PlannerDeps(workspace_name=thisRun.workspace_id)
                 )

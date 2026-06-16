@@ -51,6 +51,22 @@ def list_docs(db: Session, workspace_id: str) -> list[Doc]:
     ))
 
 
+def list_ready_docs_for_planner(db: Session, workspace_id: str) -> list[Doc]:
+    """Return every fully-ingested doc the planner may route to.
+
+    The planner does not get a document lookup tool; instead, it receives this
+    ready-doc inventory in prompt context. Only `ready` docs are usable by the
+    document_answering executor. Queued/building/failed docs are intentionally
+    omitted so the planner does not route work to sources the doc reasoner
+    cannot query yet.
+    """
+    return list(db.scalars(
+        select(Doc)
+        .where(Doc.workspace_id == workspace_id, Doc.status == "ready")
+        .order_by(desc(Doc.created_at))
+    ))
+
+
 # ── Nodes ─────────────────────────────────────────────────────────────────
 
 def create_node(db: Session, **fields: Any) -> Node:

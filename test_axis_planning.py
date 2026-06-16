@@ -10,6 +10,7 @@ from formats_pydantic import (
     TaskSpec,
 )
 from render_todo import render_todo
+from system_prompts import planner_system_prompt
 
 
 def task(**updates) -> TaskSpec:
@@ -69,6 +70,12 @@ class AxisPlanningTests(unittest.TestCase):
         self.assertNotIn("axis_checkpoint", serialized)
         self.assertNotIn("axis_focus", serialized)
         self.assertIn("axis_checkpoint", TaskSpec.model_json_schema()["properties"])
+
+    def test_planner_prompt_uses_injected_doc_inventory(self):
+        self.assertIn("Available workspace documents context", planner_system_prompt)
+        self.assertIn("There is no document lookup tool", planner_system_prompt)
+        self.assertIn("top_level_summary", planner_system_prompt)
+        self.assertNotIn("fetch_doc_ids", planner_system_prompt)
 
 
 if __name__ == "__main__":

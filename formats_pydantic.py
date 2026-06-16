@@ -6,7 +6,7 @@ from pydantic_ai.messages import ModelMessage
 
 class InternalDocAgentDeps(BaseModel):
     doc_answering_mode: Literal["ASK", "REPORT"] | None = Field(default=None, description="ASK=focused Q&A, REPORT=multi-section narrative report")
-    doc_ids: list[str] | None = Field(default=None, description="RESOLVED doc_ids (NOT filenames). When the user names specific documents, call the fetch_doc_ids tool to resolve each name to its doc_id and put the returned ids here. Leave None for a general question over all documents in the workspace. Never put a raw filename or title here.")
+    doc_ids: list[str] | None = Field(default=None, description="RESOLVED doc_ids (NOT filenames). Use ids from the injected Available workspace documents context when the user names specific ready documents. Leave None for a general question over all ready documents in the workspace or for a freshly downloaded dep PDF that will be ingested right before the task runs. Never put a raw filename or title here.")
     report_id: str | None = Field(default=None, description="RESOLVED report_id (NOT a report name). Only for doc_answering_mode='REPORT' when the user refers to an existing report by name: call the fetch_report_ids tool to resolve the name to its report_id and put it here. None to draft a fresh report.")
     target_length: Literal["brief", "standard", "deep"] | None = Field(default="standard", description="This is the target length of the report, if the user mentions anything that can be specified to the length of the report, use these field accordingly to it. This shold be filled only when doc_answering mode is 'REPORT' else set this 'None', if the doc_answering mode is 'REPORT' and the user has't specified any length keep the length 'standard'.")
 
