@@ -90,9 +90,10 @@ done in `planner()` instead.
   the same `planner_system_prompt` as `plannerAgent`. Separate agent because the
   output type differs (initial planning → `PlanOutput`; replanning →
   `ReplanDecision`).
-- Both agents register the same `fetch_doc_ids`/`fetch_report_ids` lookup tools
-  via a shared `_register_lookup_tools(agent)` helper (previously the tools were
-  bound to the single `plannerAgent` directly).
+- At the time of this change, both agents registered shared document/report
+  lookup tools through `_register_lookup_tools(agent)`. Current planner behavior
+  injects ready document ids directly into prompt context and keeps only the
+  report lookup tool.
 
 [`api/routes/chat.py`](../api/routes/chat.py):
 - `planner()` return type widened to `PlanOutput | None`. Its replan branch now

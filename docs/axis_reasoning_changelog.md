@@ -7,6 +7,15 @@ requests, the planner can stop after gathering enough evidence, ask a hidden
 axis agent which reasoning dimensions matter, and then append a better-informed
 set of tasks.
 
+**Updated:** June 16, 2026
+
+The planner now receives an injected inventory of every ready workspace
+document before each planning call. Each entry includes its stable `doc_id`,
+filename metadata, page/table counts, and ingestion-time `top_level_summary`.
+This replaces the planner's document lookup tool: ready document ids come from
+the prompt context, while the only remaining lookup tool resolves existing
+stored report names.
+
 The user continues to see an ordinary todo list. Axis checkpoints, prompts, and
 critiques remain internal.
 
@@ -400,10 +409,11 @@ The initial planner did not have to guess those tasks before reading evidence.
 | File | Change |
 | --- | --- |
 | [`formats_pydantic.py`](../formats_pydantic.py) | Added checkpoint controls, simple axis output, append-only output, validation, and checkpoint budget state. |
-| [`orchestrator.py`](../orchestrator.py) | Added the hidden thinking-enabled axis agent and append-only planner agent. |
-| [`system_prompts.py`](../system_prompts.py) | Added planner checkpoint rules, extensive universal axis prompt, and append-planner contract. |
-| [`api/routes/chat.py`](../api/routes/chat.py) | Added evidence bundling, checkpoint execution, append validation, task appending, budget enforcement, and replan preservation. |
-| [`test_axis_planning.py`](../test_axis_planning.py) | Added focused schema, privacy, and validation tests. |
+| [`orchestrator.py`](../orchestrator.py) | Added the hidden thinking-enabled axis agent and append-only planner agent; removed the planner document lookup tool. |
+| [`system_prompts.py`](../system_prompts.py) | Added planner checkpoint rules, extensive universal axis prompt, append-planner contract, ready-document inventory rules, and deeper agent routing guidance. |
+| [`api/routes/chat.py`](../api/routes/chat.py) | Added evidence bundling, checkpoint execution, append validation, task appending, budget enforcement, replan preservation, ready-document planner context injection, and a static-web routing guard. |
+| [`db/utils.py`](../db/utils.py) | Added ready-document inventory query for planner context. |
+| [`test_axis_planning.py`](../test_axis_planning.py) | Added focused schema, privacy, validation, and planner prompt contract tests. |
 
 ---
 
@@ -414,7 +424,7 @@ Verified:
 - Python compilation succeeds for all changed modules.
 - AST parsing succeeds.
 - `git diff --check` reports no whitespace errors.
-- Five focused axis-planning tests pass.
+- Six focused axis-planning tests pass.
 - A checkpoint without `axis_focus` is rejected.
 - Axis output contains only the detailed `reasoning` string.
 - Empty task additions are rejected.
@@ -429,4 +439,3 @@ Environment limitations observed during verification:
 - Two pre-existing workspace-output tests fail under the installed Pydantic
   version because those tests pass UUID and datetime values into string fields.
   Those failures are unrelated to axis reasoning.
-

@@ -1,5 +1,4 @@
 import os
-import re
 import base64
 import hashlib
 import traceback
@@ -78,33 +77,6 @@ AXIS_READABLE_SUFFIXES = {
     ".yaml",
     ".yml",
 }
-
-_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-_BROWSER_ONLY_RE = re.compile(
-    r"\b("
-    r"click|login|log in|sign in|fill|form|submit|scroll|javascript|js-rendered|"
-    r"portal|captcha|download|pdf|xlsx|xls|docx|pptx|binary"
-    r")\b",
-    re.IGNORECASE,
-)
-_STATIC_WEB_RE = re.compile(
-    r"\b("
-    r"research|extract|summari[sz]e|find|read|visible information|company information|"
-    r"navigate to|visit"
-    r")\b",
-    re.IGNORECASE,
-)
-_TEXT_OUTPUT_RE = re.compile(r"outputs/[^ \n\t]+[.](md|txt|csv|json|html?)\b", re.IGNORECASE)
-
-
-def _browser_task_can_use_web_search(task_spec: TaskSpec) -> bool:
-    """Catch planner over-routing: static webpage reading belongs to web_search."""
-    text = f"{task_spec.query}\n{task_spec.expects}"
-    if not _URL_RE.search(text):
-        return False
-    if _BROWSER_ONLY_RE.search(text):
-        return False
-    return bool(_STATIC_WEB_RE.search(text) or _TEXT_OUTPUT_RE.search(text))
 
 _pending_input: dict[str, asyncio.Future] = {}
 
@@ -839,45 +811,6 @@ async def dispatch_executor_agent(
     # Planner sees ready document ids in prompt context; execution routing happens here.
     match task_spec.agent:
         case "browser":
-            if _browser_task_can_use_web_search(task_spec):
-                await task_sink.publish_ui(
-                    "agent_progress",
-                    stage="routing",
-                    status="progress",
-                    message="Using web search for static webpage research",
-                    data={
-                        "original_agent": "browser",
-                        "effective_agent": "web_search",
-                        "reason": "task reads public web text and does not require interaction or binary download",
-                    },
-                )
-                await task_sink.publish_ui(
-                    "agent_started",
-                    stage="web_search",
-                    status="started",
-                    message="Web search agent started",
-                    data={"expects": task_spec.expects, "dep_files": dep_files},
-                )
-                web_result = await run_web_executor(
-                    workspace_subdir_path=subdir_path,
-                    query=task_spec.query,
-                    expects=task_spec.expects,
-                    dep_files=dep_files,
-                    page_cache=page_cache,
-                    sink=task_sink,
-                )
-                await task_sink.publish_ui(
-                    "agent_ended",
-                    stage="done",
-                    status="failed" if web_result.error else "completed",
-                    message="Web search agent finished" if not web_result.error else "Web search agent failed",
-                    data={
-                        "produced": web_result.produced,
-                        "notes": web_result.notes,
-                        "error": web_result.error,
-                    },
-                )
-                return web_result
             browser = BrowserExecutor( workspace=subdir_path, model=MODEL, headless=True, max_failures=8)
             browser_result = await browser.run(
                 query=task_spec.query,

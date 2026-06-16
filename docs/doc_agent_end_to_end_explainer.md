@@ -42,7 +42,7 @@ file_system_root/acme_workspace/7_query_uuid/
   outputs/source_notes.md
 ```
 
-Before `document_answering` can answer over those PDFs, the files must be ingested into the document index. In the current chat path, the planner usually resolves existing documents through planner tools (`fetch_doc_ids`) and passes `doc_ids` into `TaskSpec.doc_deps`. If a file was newly downloaded, ingestion happens through the document upload/ingest path, not through the browser agent.
+Before `document_answering` can answer over those PDFs, the files must be ingested into the document index. In the current chat path, the planner receives an injected inventory of ready workspace documents and passes those exact `doc_id` values into `TaskSpec.doc_deps` when the user names a ready document. If a file is newly downloaded by a `browser` task, the downstream `document_answering` task must depend on that browser task; the control loop ingests the dependency PDF right before the document task runs.
 
 ## Ingestion: File to Database
 
@@ -540,4 +540,3 @@ agent_ended        stage=done
 - ASK mode produces a focused grounded answer.
 - REPORT mode retrieves broad evidence, outlines, drafts sections, critiques, refines, and saves a markdown report.
 - Files users see are written under the run workspace, usually `outputs/`.
-

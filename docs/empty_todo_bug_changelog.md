@@ -91,9 +91,10 @@ full plan is re-emitted only when a revision is genuinely intended (and even
 then `min_length=1` guards it).
 
 - [`orchestrator.py`](../orchestrator.py): added `replanAgent`
-  (`output_type=ReplanDecision`, same `planner_system_prompt`). Both agents
-  share the `fetch_doc_ids`/`fetch_report_ids` lookup tools via a
-  `_register_lookup_tools` helper.
+  (`output_type=ReplanDecision`, same `planner_system_prompt`). At the time,
+  both agents shared document/report lookup tools via a `_register_lookup_tools`
+  helper. Current planner behavior injects ready document ids directly into
+  prompt context and keeps only the report lookup tool.
 - [`api/routes/chat.py`](../api/routes/chat.py) `planner()`: the replan branch
   calls `replanAgent`, interprets the decision, and returns `PlanOutput | None`
   — `None` when nothing changed (caller leaves `run.plan` untouched and spends
