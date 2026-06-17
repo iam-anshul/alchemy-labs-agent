@@ -93,6 +93,7 @@ class RouterDeps:
     candidate_doc_ids: list[str]
     # Hard guard: refuse to re-expand or expand-leaf — defends against the LLM
     # ignoring system prompt instructions.
+    _expanded_docs: set[str] = field(default_factory=set)
     _expanded_nodes: set[str] = field(default_factory=set)
     _known_leaves: set[str] = field(default_factory=set)
     # Multi-hop dedup: page ranges and tables already emitted in previous hops.
@@ -124,7 +125,9 @@ Routing strategy:
 plausibly relevant. Skip docs that are clearly off-topic.
 
 2. For each plausible doc, call `expand_doc` ONCE. You will get back its top-level sections \
-with brief summaries. Each section also tells you `has_children` and `pages` (its page range).
+with brief summaries. Each section also tells you `has_children` and `pages` (its page range). \
+If a document has no child sections, `expand_doc` returns the root document node itself; treat it \
+as a valid section and use it as a page_target when relevant.
 
 3. For each section, pick exactly ONE of three actions based on its brief summary:
      (a) **skip** — clearly irrelevant
@@ -208,14 +211,39 @@ def _build_router(
         if doc_id not in ctx.deps.candidate_doc_ids:
             log.warning("[router] expand_doc: %s not in candidates", doc_id)
             return [{"error": f"doc_id {doc_id} is not in the candidate list"}]
+        if doc_id in ctx.deps._expanded_docs:
+            log.warning("[router] expand_doc: %s was already expanded — REJECTED", doc_id)
+            return [{
+                "doc_id": doc_id,
+                "status": "already_expanded",
+                "action": "stop_expanding_this_doc",
+                "message": (
+                    "This document was already expanded earlier in this run. "
+                    "Use the sections you already received, commit to page/table targets, "
+                    "or skip this doc."
+                ),
+            }]
         with SessionLocal() as db:
             roots = utils.get_root_nodes(db, doc_id)
             if not roots:
                 log.info("[router] expand_doc(%s) -> no roots", doc_id)
-                return []
+                ctx.deps._expanded_docs.add(doc_id)
+                return [{
+                    "doc_id": doc_id,
+                    "status": "empty_tree",
+                    "has_children": False,
+                    "action": "stop_expanding_this_doc",
+                    "message": (
+                        "No document tree sections are available for this doc. "
+                        "Do not call expand_doc again. If the query needs numeric/tabular evidence, "
+                        "call list_doc_tables(doc_id). Otherwise skip this doc and return no page_targets for it."
+                    ),
+                    "page_target_available": False,
+                }]
             root = roots[0]
             children = [db.get(Node, cid) for cid in (root.child_ids or [])]
-            result = [_brief_node(c) for c in children if c]
+            ctx.deps._expanded_docs.add(doc_id)
+            result = [_brief_node(c) for c in children if c] or [_brief_node(root)]
             log.info("[router] expand_doc(%s) -> %d section(s): %s",
                      doc_id, len(result), [r["title"] for r in result])
             return result
