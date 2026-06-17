@@ -1,5 +1,13 @@
 # Changelog
 
+## Logfire: explicit axis checkpoint tracing
+
+Added named Logfire spans around the hidden axis-reasoning checkpoint path:
+`axis checkpoint`, `axis evidence critic`, and `axis append planner`. This makes
+it visible when a planner-selected checkpoint fires, how much evidence it
+reviewed, which append attempt ran, and whether appended task validation
+succeeded or failed. See `docs/CHANGELOG_LOGFIRE.md` for details.
+
 ## Workspace filesystem layout: namespace workspaces under user id
 
 ### Summary

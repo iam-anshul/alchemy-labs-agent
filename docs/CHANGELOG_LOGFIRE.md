@@ -6,6 +6,39 @@ captured automatically.
 
 ---
 
+## Update — Axis checkpoint spans
+
+Added explicit Logfire spans for the hidden axis-reasoning checkpoint path in
+`api/routes/chat.py`.
+
+The pydantic-ai instrumentation already captures the underlying `axisAgent` and
+`axisAppendPlannerAgent` model calls, but those calls were easy to miss because
+the axis checkpoint is an internal control-loop step and its fields are excluded
+from normal task serialization. The new spans make the checkpoint lifecycle
+visible as named trace nodes.
+
+New spans:
+
+- `axis checkpoint` — parent span for the whole hidden evidence review, with
+  `workspace_id`, `task_id`, `task_title`, checkpoint budget, and produced
+  artifact count.
+- `axis evidence critic` — wraps `axisAgent.run(...)`, with `evidence_chars`.
+- `axis append planner` — wraps each `axisAppendPlannerAgent.run(...)` attempt,
+  with attempt number and remaining checkpoint budget.
+
+New events:
+
+- `axis checkpoint appended tasks` — emitted when the append-only planner returns
+  a valid segment.
+- `axis append planner rejected` — emitted when an appended segment fails
+  internal validation, including the validation error and attempt number.
+
+This keeps the full internal critique inside the normal instrumented agent run,
+while the explicit spans expose the control-flow decision points needed to debug
+whether the axis path fired.
+
+---
+
 ## Summary
 
 Logfire is now configured **once** at process startup, and pydantic-ai is
