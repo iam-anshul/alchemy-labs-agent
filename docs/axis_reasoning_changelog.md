@@ -173,11 +173,18 @@ The result is one detailed planning brief rather than a large nested schema.
 This keeps Qwen structured output reliable while still giving the next planner
 enough information to create targeted tasks.
 
-Native model thinking is enabled only for this hidden agent:
+Native model thinking is enabled for this hidden agent:
 
 ```python
 extra_body={"enable_thinking": True}
 ```
+
+Kimi rejects `tool_choice="required"` when thinking is enabled, so the shared
+`QwenChatModel` compatibility wrapper marks
+`openai_supports_tool_choice_required=False`. The agents still use pydantic-ai
+`ToolOutput(...)`, but pydantic-ai sends `tool_choice="auto"` instead of
+`required`, preserving structured checkpoint output compatibility while allowing
+thinking mode.
 
 The reasoning string must explain:
 

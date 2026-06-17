@@ -35,6 +35,7 @@ from typing import Any
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.settings import ModelSettings
 
 
@@ -166,6 +167,12 @@ class QwenChatModel(OpenAIChatModel):
     before pydantic-ai validates them — schema-aware, so only collection-typed
     parameters are decoded. Drop-in; behaviour is identical for well-formed
     responses."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.profile = OpenAIModelProfile(
+            openai_supports_tool_choice_required=False
+        ).update(self.profile)
 
     def _repair_response(
         self, response: ModelResponse, params: ModelRequestParameters
