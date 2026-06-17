@@ -284,7 +284,8 @@ class BrowserExecutor:
             tools=tools,
             use_cloud=self.use_cloud,
             browser=browser,
-            max_failures=self.max_failures
+            max_failures=self.max_failures,
+            flash_mode=True,
         )
 
         history = None

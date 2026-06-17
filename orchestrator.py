@@ -38,7 +38,7 @@ plannerAgent = Agent(
     retries=3,
     deps_type=PlannerDeps,
     output_type=ToolOutput(PlanOutput, name="submit_plan"),
-    model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
+    model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": True}),
 )
 
 # Replanning: decide whether the in-flight plan needs revision, and only then
@@ -53,7 +53,7 @@ replanAgent = Agent(
     retries=3,
     deps_type=PlannerDeps,
     output_type=ToolOutput(ReplanDecision, name="submit_replan_decision"),
-    model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": False}),
+    model_settings=OpenAIChatModelSettings(extra_body={"enable_thinking": True}),
 )
 
 # Hidden evidence critic. Its output is intentionally one detailed string: the

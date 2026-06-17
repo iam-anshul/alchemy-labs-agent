@@ -3,6 +3,7 @@ import base64
 import hashlib
 import traceback
 from pathlib import Path
+import logfire
 from orchestrator import (
     axisAgent,
     axisAppendPlannerAgent,
@@ -433,70 +434,107 @@ async def run_axis_checkpoint(
 ) -> AxisPlanAddition:
     """Critique checkpoint evidence, then obtain a validated append-only segment."""
     axis_sink = sink.child(task_id=checkpoint_task.id, agent_type="planner")
-    await axis_sink.publish_ui(
-        "agent_started",
-        stage="replanning",
-        status="started",
-        message="Reviewing completed evidence",
-        data={"phase": "evidence_review"},
-    )
-
-    evidence_bundle = _build_axis_evidence_bundle(run, checkpoint_task)
-    critique_prompt = (
-        f"USER QUESTION:\n{run.user_query}\n\n"
-        f"CURRENT PLAN:\n{render_todo(run)}\n\n"
-        f"CHECKPOINT TASK:\n"
-        f"id: {checkpoint_task.id}\n"
-        f"title: {checkpoint_task.title}\n"
-        f"focus: {checkpoint_task.axis_focus}\n\n"
-        f"COMPLETED EVIDENCE:\n{evidence_bundle}"
-    )
-    critique_run = await axisAgent.run(user_prompt=critique_prompt)
-    critique = critique_run.output.reasoning
-
-    existing_ids = [task.id for task in run.plan.tasks] if run.plan else []
-    remaining_budget = max(
-        0,
-        run.axis_checkpoint_budget - run.axis_checkpoints_used - 1,
-    )
-    base_append_prompt = (
-        f"USER GOAL:\n{run.goal}\n\n"
-        f"{_format_available_docs_for_planner(run.workspace_id)}\n\n"
-        f"CURRENT PLAN:\n{render_todo(run)}\n\n"
-        f"COMPLETED CHECKPOINT:\n"
-        f"id: {checkpoint_task.id}\n"
-        f"title: {checkpoint_task.title}\n"
-        f"produced: {checkpoint_task.produced}\n\n"
-        f"RESERVED EXISTING TASK IDS:\n{existing_ids}\n\n"
-        f"REMAINING CHECKPOINT BUDGET AFTER THIS PASS:\n{remaining_budget}\n\n"
-        f"INTERNAL EVIDENCE CRITIQUE:\n{critique}\n\n"
-        "Append the next task segment. Return only new tasks."
-    )
-
-    validation_error: str | None = None
-    for attempt in range(1, AXIS_APPEND_ATTEMPTS + 1):
-        prompt = base_append_prompt
-        if validation_error:
-            prompt += (
-                "\n\nYour previous appended segment was rejected for this "
-                f"control-loop reason:\n{validation_error}\n"
-                "Correct the segment while preserving the append-only rules."
-            )
-        append_run = await axisAppendPlannerAgent.run(
-            user_prompt=prompt,
-            deps=PlannerDeps(workspace_name=run.workspace_id),
+    with logfire.span(
+        "axis checkpoint",
+        workspace_id=run.workspace_id,
+        task_id=checkpoint_task.id,
+        task_title=checkpoint_task.title,
+        checkpoints_used=run.axis_checkpoints_used,
+        checkpoint_budget=run.axis_checkpoint_budget,
+        produced_count=len(checkpoint_task.produced),
+    ):
+        await axis_sink.publish_ui(
+            "agent_started",
+            stage="replanning",
+            status="started",
+            message="Reviewing completed evidence",
+            data={"phase": "evidence_review"},
         )
-        addition = append_run.output
-        validation_error = _validate_axis_addition(run, checkpoint_task, addition)
-        if validation_error is None:
-            await axis_sink.publish_ui(
-                "agent_ended",
-                stage="replanning",
-                status="completed",
-                message="Plan updated from completed evidence",
-                data={"phase": "evidence_review", "tasks_added": len(addition.tasks)},
+
+        evidence_bundle = _build_axis_evidence_bundle(run, checkpoint_task)
+        critique_prompt = (
+            f"USER QUESTION:\n{run.user_query}\n\n"
+            f"CURRENT PLAN:\n{render_todo(run)}\n\n"
+            f"CHECKPOINT TASK:\n"
+            f"id: {checkpoint_task.id}\n"
+            f"title: {checkpoint_task.title}\n"
+            f"focus: {checkpoint_task.axis_focus}\n\n"
+            f"COMPLETED EVIDENCE:\n{evidence_bundle}"
+        )
+        with logfire.span(
+            "axis evidence critic",
+            workspace_id=run.workspace_id,
+            task_id=checkpoint_task.id,
+            evidence_chars=len(evidence_bundle),
+        ):
+            critique_run = await axisAgent.run(user_prompt=critique_prompt)
+        critique = critique_run.output.reasoning
+
+        existing_ids = [task.id for task in run.plan.tasks] if run.plan else []
+        remaining_budget = max(
+            0,
+            run.axis_checkpoint_budget - run.axis_checkpoints_used - 1,
+        )
+        base_append_prompt = (
+            f"USER GOAL:\n{run.goal}\n\n"
+            f"{_format_available_docs_for_planner(run.workspace_id)}\n\n"
+            f"CURRENT PLAN:\n{render_todo(run)}\n\n"
+            f"COMPLETED CHECKPOINT:\n"
+            f"id: {checkpoint_task.id}\n"
+            f"title: {checkpoint_task.title}\n"
+            f"produced: {checkpoint_task.produced}\n\n"
+            f"RESERVED EXISTING TASK IDS:\n{existing_ids}\n\n"
+            f"REMAINING CHECKPOINT BUDGET AFTER THIS PASS:\n{remaining_budget}\n\n"
+            f"INTERNAL EVIDENCE CRITIQUE:\n{critique}\n\n"
+            "Append the next task segment. Return only new tasks."
+        )
+
+        validation_error: str | None = None
+        for attempt in range(1, AXIS_APPEND_ATTEMPTS + 1):
+            prompt = base_append_prompt
+            if validation_error:
+                prompt += (
+                    "\n\nYour previous appended segment was rejected for this "
+                    f"control-loop reason:\n{validation_error}\n"
+                    "Correct the segment while preserving the append-only rules."
+                )
+            with logfire.span(
+                "axis append planner",
+                workspace_id=run.workspace_id,
+                task_id=checkpoint_task.id,
+                attempt=attempt,
+                remaining_checkpoint_budget=remaining_budget,
+            ):
+                append_run = await axisAppendPlannerAgent.run(
+                    user_prompt=prompt,
+                    deps=PlannerDeps(workspace_name=run.workspace_id),
+                )
+            addition = append_run.output
+            validation_error = _validate_axis_addition(run, checkpoint_task, addition)
+            if validation_error is None:
+                await axis_sink.publish_ui(
+                    "agent_ended",
+                    stage="replanning",
+                    status="completed",
+                    message="Plan updated from completed evidence",
+                    data={"phase": "evidence_review", "tasks_added": len(addition.tasks)},
+                )
+                logfire.info(
+                    "axis checkpoint appended tasks",
+                    workspace_id=run.workspace_id,
+                    task_id=checkpoint_task.id,
+                    tasks_added=len(addition.tasks),
+                    attempt=attempt,
+                )
+                return addition
+
+            logfire.warning(
+                "axis append planner rejected",
+                workspace_id=run.workspace_id,
+                task_id=checkpoint_task.id,
+                attempt=attempt,
+                validation_error=validation_error,
             )
-            return addition
 
     raise RuntimeError(
         "axis append planner could not produce a valid task segment after "
