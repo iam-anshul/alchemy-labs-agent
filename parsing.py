@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+import logfire
 from openpyxl import Workbook
 
 from api.events import EventSink
@@ -105,7 +106,33 @@ async def parse_document_async(path: str, sink: EventSink = EventSink()) -> Pars
     """Parse a document with LlamaParse (async)."""
     await sink.publish("parse_started", {"path": path})
     parser = _build_parser()
-    result = await parser.aparse(path)
+    try:
+        result = await parser.aparse(path)
+    except Exception as e:
+        # LlamaParse surfaces a billing failure as a generic Exception whose
+        # message embeds the API's JSON body (e.g. "...exceeded the maximum
+        # number of credits for your plan."). That otherwise lands in Logfire as
+        # an undifferentiated parse error. Detect it and log a distinct,
+        # searchable error so an exhausted LlamaParse plan is obvious at a glance
+        # rather than looking like a per-document parse bug. Re-raise either way
+        # so the ingest worker still flips the doc to status='failed'.
+        message = str(e)
+        if "credits for your plan" in message or "exceeded the maximum number of credits" in message:
+            logfire.error(
+                "LlamaParse out of credits: parsing is blocked until the plan is "
+                "topped up or LLAMA_PARSE_KEY points at an account with credits",
+                path=path,
+                llama_parse_error=message,
+                error_class=type(e).__name__,
+            )
+        else:
+            logfire.error(
+                "LlamaParse failed to parse document",
+                path=path,
+                llama_parse_error=message,
+                error_class=type(e).__name__,
+            )
+        raise
     parsed = _collect(result)
     await sink.publish("parse_done", {"n_pages": parsed.n_pages, "n_tables": len(parsed.tables)})
     return parsed
