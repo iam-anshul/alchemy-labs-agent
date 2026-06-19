@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o"
+    # Model the document agent uses (tree-building summaries + doc Q&A). Kept
+    # separate from openai_model so the ingest/doc pipeline can run on a
+    # different model than the rest of the app without coupling the two. Reads
+    # the DOC_AGENT_MODEL env var; falls back to openai_model when unset so an
+    # unconfigured deployment keeps its previous single-model behavior.
+    doc_agent_model: str = ""
     llama_parse_key: str = ""
 
     # Tree builder
@@ -51,6 +57,16 @@ class Settings(BaseSettings):
     api_auth_tokens: str = ""
     api_ingest_workers: int = 2
     api_upload_dir: str = "data/uploads"
+
+
+    def resolve_doc_agent_model(self) -> str:
+        """Model for the document agent (tree summaries + doc Q&A).
+
+        Returns DOC_AGENT_MODEL when set, else falls back to openai_model.
+        Centralized so every doc-side call site resolves the fallback the same
+        way instead of repeating `doc_agent_model or openai_model`.
+        """
+        return self.doc_agent_model or self.openai_model
 
 
 @lru_cache

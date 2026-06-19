@@ -78,7 +78,7 @@ def _build_model() -> OpenAIChatModel:
         raise RuntimeError("OPENAI_API_KEY is not set in .env")
     provider = OpenAIProvider(api_key=s.openai_api_key, base_url=s.openai_base_url)
     settings = OpenAIChatModelSettings(extra_body={"enable_thinking": False})
-    _cached_model = OpenAIChatModel(s.openai_model, provider=provider, settings=settings)
+    _cached_model = OpenAIChatModel(s.resolve_doc_agent_model(), provider=provider, settings=settings)
     return _cached_model
 
 

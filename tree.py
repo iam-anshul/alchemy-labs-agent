@@ -310,7 +310,7 @@ async def build_tree(
     t_total = time.monotonic()
     s = get_settings()
     client = AsyncOpenAI(api_key=s.openai_api_key, base_url=s.openai_base_url)
-    model  = s.openai_model
+    model  = s.resolve_doc_agent_model()
     max_leaf = s.tree_max_leaf_tokens
     min_leaf = s.tree_min_leaf_tokens
     max_ch   = s.tree_max_children
