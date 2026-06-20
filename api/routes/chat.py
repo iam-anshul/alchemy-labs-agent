@@ -29,7 +29,6 @@ from formats_pydantic import (
     InternalDocAgentDeps,
 )
 from render_todo import render_todo
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart, TextPart
 from time import time
 import asyncio
 import shutil
@@ -61,7 +60,6 @@ chat_router = APIRouter()
 # sidesteps a wedged session rather than re-poking it. This catches transient
 # failures (a one-off hang, a flaky page) without spending a replan.
 MAX_DISPATCH_ATTEMPTS = 3
-USER_FEEDBACK_TIMEOUT_SECONDS = 300
 AXIS_EVIDENCE_FILE_CHAR_LIMIT = 20_000
 AXIS_EVIDENCE_TOTAL_CHAR_LIMIT = 80_000
 AXIS_APPEND_ATTEMPTS = 3
@@ -382,9 +380,10 @@ def _format_available_docs_for_planner(workspace_id: str) -> str:
     return "\n".join(lines)
 
 
-def _with_planner_workspace_context(workspace_id: str, prompt: str) -> str:
+def _with_planner_workspace_context(workspace_id: str, prompt: str, current_query_id=None) -> str:
     return (
         f"{_format_available_docs_for_planner(workspace_id)}\n\n"
+        f"{_format_prior_runs_hint(workspace_id, current_query_id)}\n\n"
         f"Planner request:\n{prompt}"
     )
 
@@ -541,34 +540,54 @@ async def run_axis_checkpoint(
         f"{AXIS_APPEND_ATTEMPTS} attempts: {validation_error}"
     )
     
-def _build_message_history_from_prior_runs(workspace_id: str, current_run_id: str | None) -> list[ModelMessage]:
-    """Reconstruct a synthetic conversation history from this workspace's prior
-    runs so the planner can see what was tried before (Option B per the design
-    discussion). For each prior run we emit a ModelRequest(user_goal) + a
-    ModelResponse(todo_md) pair — pydantic-ai treats this as a real multi-turn
-    conversation when passed via the `message_history` parameter.
+def _format_prior_runs_hint(workspace_id: str, current_query_id) -> str:
+    """One-line awareness hint pushed into the planner's prompt context.
 
-    Why prior runs instead of just the current one's state: this is the
-    "learn from prior conversation turns" feature. Within a single run, replan
-    calls deliberately skip this — they should only reason about the in-flight
-    todo.md, not get distracted by past conversation.
+    History is now PULLED (the planner calls list_prior_runs / get_run_todo /
+    list_prior_artifacts / fetch_prior_artifact on demand) rather than pushed
+    as a synthetic message_history. But the planner can't decide to look back
+    if it doesn't know history exists — so we always push this cheap one-liner:
+    how many prior runs there are and what the most recent one was. The full
+    todo.md timeline is no longer injected; the planner fetches the specific
+    runs it judges relevant. Best-effort: a lookup failure degrades to a
+    neutral note rather than breaking planning."""
+    exclude = current_query_id if isinstance(current_query_id, UUID) else (
+        UUID(str(current_query_id)) if current_query_id else UUID(int=0)
+    )
+    try:
+        with SessionLocal() as db:
+            count, latest = db_utils.count_prior_runs(
+                db, workspace_id=workspace_id, exclude_query_id=exclude
+            )
+    except Exception as e:
+        return (
+            "Prior-run history: unavailable because the history lookup failed "
+            f"({type(e).__name__}: {e}). Proceed as if this is the first run."
+        )
 
-    The current in-flight run is excluded by run_id even if its row was
-    created at run-start (status='running' with empty todo_md); otherwise the
-    planner would see itself in its own history."""
-    with SessionLocal() as db:
-        runs = db_utils.list_recent_runs(db, workspace_id=workspace_id, limit=5)
-    messages: list[ModelMessage] = []
-    for r in runs:
-        if current_run_id is not None and r.query_id == current_run_id:
-            continue
-        if not r.todo_md:
-            # Skip runs that never completed enough to render a todo.md —
-            # they'd be noise without signal.
-            continue
-        messages.append(ModelRequest(parts=[UserPromptPart(content=r.user_query)]))
-        messages.append(ModelResponse(parts=[TextPart(content=r.todo_md)]))
-    return messages
+    if count == 0:
+        return (
+            "Prior-run history: this is the first run in the workspace — there is "
+            "no earlier work to continue."
+        )
+
+    latest_line = ""
+    if latest is not None:
+        latest_line = (
+            f" Most recent: \"{_truncate_planner_text(latest.get('user_query'), 200)}\" "
+            f"(status={latest.get('status')}, query_counter={latest.get('query_counter')})."
+        )
+    return (
+        f"Prior-run history: this workspace has {count} prior run(s).{latest_line} "
+        "If this query continues or builds on earlier work, use the look-back "
+        "tools: list_prior_runs to browse, get_run_todo(query_id) to read a "
+        "specific past plan, list_prior_artifacts to see prior files, and "
+        "fetch_prior_artifact(query_id, rel_path) to copy a specific older file "
+        "into this run for an executor to read. The MOST RECENT run's files are "
+        "already restored into this run's outputs/ — fetch only when you need an "
+        "OLDER run's output. Do not call these tools for a self-contained new "
+        "request that does not build on prior work."
+    )
 
 async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
     """Run the planner LLM.
@@ -594,12 +613,12 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
             message="Planning the work",
             data={"phase": "initial"},
         )
-        message_history: list[ModelMessage] = []
-        if run.query_counter > 1:
-            message_history = _build_message_history_from_prior_runs(
-                workspace_id=run.workspace_id,
-                current_run_id=run.query_id,
-            )
+        # Cross-run history is no longer pushed as message_history. Instead a
+        # one-line awareness hint is folded into the workspace context, and the
+        # planner PULLS prior plans/artifacts on demand via its look-back tools
+        # (list_prior_runs / get_run_todo / list_prior_artifacts /
+        # fetch_prior_artifact). Those tools need this run's subdir + identity,
+        # supplied through PlannerDeps below.
         validation_error: str | None = None
         for _ in range(3):
             initial_prompt = run.goal
@@ -610,9 +629,14 @@ async def planner(run: QueryRun, sink: EventSink) -> PlanOutput | None:
                     "axis checkpoint, the current task segment must end there."
                 )
             planner_run = await plannerAgent.run(
-                user_prompt=_with_planner_workspace_context(run.workspace_id, initial_prompt),
-                message_history=message_history or None,
-                deps=PlannerDeps(workspace_name=run.workspace_id)
+                user_prompt=_with_planner_workspace_context(
+                    run.workspace_id, initial_prompt, run.query_id
+                ),
+                deps=PlannerDeps(
+                    workspace_name=run.workspace_id,
+                    subdir_path=run.workspace,
+                    current_query_id=str(run.query_id) if run.query_id else None,
+                ),
             )
             validation_error = _initial_axis_plan_error(planner_run.output)
             if validation_error is None:
@@ -1143,25 +1167,24 @@ async def create_chat(
     start_workers(n=2)
     page_cache: dict[str, CachedPage] = {}
     try:
-        thisRun.plan = await planner(thisRun, sink)
-
         # Per-run filesystem subdir under the chat's workspace folder. Sub-agents'
         # _resolve_inside guard keeps them confined to THIS subdir, so cross-run
-        # contamination is impossible — but the DB layer captures the chat identity
-        # so the planner still sees prior runs via message_history.
-        # Naming works like this------>
-        # 1. we need to create this worksapce subdir after the first planner run, reason being we can use goal field of todo.md from planner as its name.
-        # 2. we need to have a query counter maintainer in db, all the names of the chat run will be prefixed with this counter value, so the naming scheme will look something like this: f"{query_counter}_{plan.goal}""
-        workspace_sub_dir = f"{thisRun.query_counter}_{str(thisRun.query_id)}" # define query counter in db
+        # contamination is impossible. The subdir name is {query_counter}_{query_id}
+        # — independent of the plan's goal — so it can be (and now is) created
+        # BEFORE the first planner call. The planner needs this path up front
+        # because its fetch_prior_artifact tool copies prior-run files into it.
+        workspace_sub_dir = f"{thisRun.query_counter}_{str(thisRun.query_id)}"
         absolute_workspace_path_with_subdir = f"{absolute_workspace_path}/{workspace_sub_dir}"
         thisRun.workspace = absolute_workspace_path_with_subdir
         make_workspace(Path(absolute_workspace_path_with_subdir))
 
         # Seed this run's outputs/ from the most recent prior run's produced
-        # files. Executors are sandboxed to this subdir, so a "continue the
-        # work" run otherwise can't see what an earlier run made; restoring the
-        # prior artifacts lets the new plan build on them by path. No-op when
-        # there is no prior run (a fresh workspace's first run).
+        # files (EAGER RESTORE). Executors are sandboxed to this subdir, so a
+        # "continue the work" run otherwise can't see what an earlier run made;
+        # restoring the prior artifacts lets the new plan build on them by path.
+        # No-op when there is no prior run (a fresh workspace's first run).
+        # This handles the COMMON case (most-recent run). For OLDER runs the
+        # planner pulls on demand via its fetch_prior_artifact tool.
         with SessionLocal() as db:
             prior_artifacts = db_utils.get_latest_prior_run_artifacts(
                 db, workspace_id=workspace_name, exclude_query_id=query_id
@@ -1176,6 +1199,8 @@ async def create_chat(
                     message=f"Restored {len(restored)} file(s) from the previous run",
                     data={"restored": restored},
                 )
+
+        thisRun.plan = await planner(thisRun, sink)
 
         # write todo
         write_todo_atomic(thisRun)
@@ -1192,17 +1217,15 @@ async def create_chat(
             )
             future = asyncio.get_event_loop().create_future()
             _pending_input[str(query_id)] = future
+            # No timeout: the run parks here until the user answers the planner's
+            # clarification. This keeps the loop's exit state consistent — the
+            # ONLY way out is the planner returning a plan that no longer needs
+            # feedback (its needs_user_feedback default is False), so the stale-
+            # flag fall-through that a timeout+break path caused cannot happen.
+            # Trade-off: an abandoned run holds its task/DB/SSE/ingest workers
+            # open indefinitely (accepted limitation).
             try:
-                answer = await asyncio.wait_for(future, timeout=USER_FEEDBACK_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
-                await sink.child(agent_type="planner").publish_ui(
-                    "agent_progress",
-                    stage="planning",
-                    status="failed",
-                    message="User input timed out",
-                    data={"question": thisRun.plan.feedback_question, "scope": "planner"},
-                )
-                break
+                answer = await future
             finally:
                 _pending_input.pop(str(query_id), None)
 
@@ -1216,9 +1239,15 @@ async def create_chat(
                         "checkpoint is the final task in the current segment."
                     )
                 planner_run = await plannerAgent.run(
-                    user_prompt=_with_planner_workspace_context(thisRun.workspace_id, feedback_prompt),
+                    user_prompt=_with_planner_workspace_context(
+                        thisRun.workspace_id, feedback_prompt, thisRun.query_id
+                    ),
                     message_history=thisRun.planner_messages,
-                    deps=PlannerDeps(workspace_name=thisRun.workspace_id)
+                    deps=PlannerDeps(
+                        workspace_name=thisRun.workspace_id,
+                        subdir_path=thisRun.workspace,
+                        current_query_id=str(thisRun.query_id) if thisRun.query_id else None,
+                    ),
                 )
                 validation_error = _initial_axis_plan_error(planner_run.output)
                 if validation_error is None:
@@ -1391,16 +1420,11 @@ async def create_chat(
 
                         future = asyncio.get_event_loop().create_future()
                         _pending_input[str(query_id)] = future
+                        # No timeout: park until the user responds to this task's
+                        # HITL question (consistent with the planner HITL wait).
+                        # human_answer is therefore always set once we proceed.
                         try:
-                            human_answer = await asyncio.wait_for(future, timeout=USER_FEEDBACK_TIMEOUT_SECONDS)
-                        except asyncio.TimeoutError:
-                            await sink.child(task_id=task.id, agent_type=task.agent).publish_ui(
-                                "agent_progress",
-                                stage="task",
-                                status="failed",
-                                message="User input timed out",
-                                data={"question": task.query_for_human_in_the_loop, "scope": "task"},
-                            )
+                            human_answer = await future
                         finally:
                             _pending_input.pop(str(query_id), None)
 

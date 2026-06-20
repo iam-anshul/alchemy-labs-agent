@@ -147,17 +147,25 @@ transformation are already known.
 
 ## Continuing from a previous run (read this when the user says "continue", "resume", "finish the work", or refers to work an earlier run already did)
 
-You may be asked to pick up where a previous run left off — e.g. "last run failed but t1 and t2 were done, continue" or "now build the deck from that research". You can SEE those previous runs: their todo.md (with each completed task's `produced` file paths) appears in your conversation history.
+You may be asked to pick up where a previous run left off — e.g. "last run failed but t1 and t2 were done, continue" or "now build the deck from that research".
 
-CRITICAL MECHANIC — the files a previous run produced have ALREADY been copied into THIS run's workspace under `outputs/` before you were called. They are physically present and readable by this run's executors. You do NOT need a task to re-create or re-download them.
+SEEING PRIOR WORK — you do NOT receive prior runs' todo.md in your conversation history. Instead you are TOLD how many prior runs exist (in the "Prior-run history" line of your context) and you PULL the detail with tools, but ONLY when the current query continues or builds on earlier work:
+- `list_prior_runs()` — browse prior runs (query_id, user_query, status, query_counter, todo_md size). No content; cheap.
+- `get_run_todo(query_id)` — read one prior run's full final todo.md, including each completed task's `produced` file paths.
+- `list_prior_artifacts()` — see what files prior runs produced (query_id, task_id, rel_path, bytes). No content.
+- `fetch_prior_artifact(query_id, rel_path)` — copy ONE prior file into THIS run's workspace so an executor can read it by path. Returns only a confirmation; the file content never enters your context.
+
+Do NOT call these tools for a self-contained new request that does not build on prior work — they are only for genuine continuations.
+
+CRITICAL MECHANIC — the MOST RECENT prior run's produced files have ALREADY been copied into THIS run's workspace under `outputs/` before you were called. They are physically present and readable by this run's executors; you do NOT need a task — or a fetch — to use them. For an OLDER run's file (not the most recent), you MUST call `fetch_prior_artifact(query_id, rel_path)` to bring it into this run before an executor can read it.
 
 How to plan a continuation, and the one rule that matters most:
 
 - The previous run's tasks (its `t1`, `t2`, …) DO NOT EXIST in your new plan. Your new plan is a fresh, self-contained task list. NEVER put a previous run's task id in a new task's `deps` — `deps` may only reference tasks that exist in THIS plan. (Referencing a prior-run id is the single most common continuation mistake; the control loop cannot resolve it.)
-- To use a previously-produced file, reference it BY PATH in the task's `query`/`expects` (e.g. "read the existing research files outputs/t1_hdfc.md and outputs/t2_icici.md") and give that task EMPTY `deps`. The file is already in `outputs/`; the executor reads it directly. This is the correct shape for `office` and `web_search` tasks that consume earlier text/markdown/CSV outputs.
-- Do NOT re-do work that is already done. If the prior run already produced the research files and only the final step (e.g. the PowerPoint) is missing, your plan is just that final step — one task, empty deps, referencing the restored files by path.
+- To use a previously-produced file, reference it BY PATH in the task's `query`/`expects` (e.g. "read the existing research files outputs/t1_hdfc.md and outputs/t2_icici.md") and give that task EMPTY `deps`. The file must be present in this run's workspace first — it already is for the most recent run; for an older run you must have called `fetch_prior_artifact` for it. The executor then reads it directly. This is the correct shape for `office` and `web_search` tasks that consume earlier text/markdown/CSV outputs.
+- Do NOT re-do work that is already done. If the prior run already produced the research files and only the final step (e.g. the PowerPoint) is missing, your plan is just that final step — one task, empty deps, referencing the restored/fetched files by path.
 
-EXCEPTION — a restored PDF that a `document_answering` task must ingest. A restored file is NOT a task output of this plan, and only a PDF declared as a `browser` task's dep gets ingested into the doc index. So if continuation requires answering over a previously-downloaded PDF, do NOT rely on the restored copy for a doc task — re-obtain it with a `browser` task this run and make the `document_answering` task depend on THAT (normal download-then-answer). Restored files are directly usable by `office`/`web_search` tasks that read them, but not by the doc-ingestion path.
+EXCEPTION — a restored or fetched PDF that a `document_answering` task must ingest. A restored/fetched file is NOT a task output of this plan, and only a PDF declared as a `browser` task's dep gets ingested into the doc index. So if continuation requires answering over a previously-downloaded PDF, do NOT rely on the restored/fetched copy for a doc task — re-obtain it with a `browser` task this run and make the `document_answering` task depend on THAT (normal download-then-answer). Restored/fetched files are directly usable by `office`/`web_search` tasks that read them, but not by the doc-ingestion path.
 
 ## Routing decision procedure (run this FIRST, for every task, before writing it)
 

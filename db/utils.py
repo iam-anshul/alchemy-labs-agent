@@ -420,6 +420,151 @@ def append_run_artifacts(
     db.commit()
 
 
+def list_prior_runs_meta(
+    db: Session, workspace_id: str, exclude_query_id: UUID, limit: int = 50
+) -> list[dict]:
+    """Cheap metadata for the planner's prior-run history tools.
+
+    Returns up to `limit` prior runs in this workspace (newest first),
+    EXCLUDING the in-flight run, as lightweight dicts:
+    {query_id, user_query, status, started_at, query_counter, todo_md_chars}.
+
+    Deliberately does NOT return todo_md content — only its length — so the
+    planner can browse the workspace timeline without pulling every plan into
+    context. It then calls get_run_todo_md(query_id) for the specific runs it
+    decides are relevant. Runs that never rendered a todo (todo_md is NULL) are
+    still listed with todo_md_chars=0 so the planner sees they exist but knows
+    there is no plan to fetch."""
+    rows = db.scalars(
+        select(QueryRun)
+        .where(
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.query_id != exclude_query_id,
+        )
+        .order_by(desc(QueryRun.started_at))
+        .limit(limit)
+    )
+    return [
+        {
+            "query_id": str(run.query_id),
+            "user_query": run.user_query,
+            "status": run.status,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "query_counter": run.query_counter,
+            "todo_md_chars": len(run.todo_md) if run.todo_md else 0,
+        }
+        for run in rows
+    ]
+
+
+def count_prior_runs(
+    db: Session, workspace_id: str, exclude_query_id: UUID
+) -> tuple[int, dict | None]:
+    """Return (count_of_prior_runs, latest_prior_run_meta_or_None) for the
+    one-line history hint pushed into planner context. The latest meta is the
+    same lightweight dict shape as list_prior_runs_meta entries. Excludes the
+    in-flight run. count counts ALL prior runs in the workspace (not capped),
+    so the hint can say e.g. 'this workspace has 37 prior runs'."""
+    count = db.scalar(
+        select(func.count())
+        .select_from(QueryRun)
+        .where(
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.query_id != exclude_query_id,
+        )
+    ) or 0
+    latest = db.scalars(
+        select(QueryRun)
+        .where(
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.query_id != exclude_query_id,
+        )
+        .order_by(desc(QueryRun.started_at))
+        .limit(1)
+    ).first()
+    latest_meta = None
+    if latest is not None:
+        latest_meta = {
+            "query_id": str(latest.query_id),
+            "user_query": latest.user_query,
+            "status": latest.status,
+            "started_at": latest.started_at.isoformat() if latest.started_at else None,
+            "query_counter": latest.query_counter,
+            "todo_md_chars": len(latest.todo_md) if latest.todo_md else 0,
+        }
+    return int(count), latest_meta
+
+
+def get_run_todo_md(
+    db: Session, workspace_id: str, query_id: UUID
+) -> str | None:
+    """Return one prior run's full final todo.md, or None if the run doesn't
+    exist in this workspace or never rendered a todo. Workspace-scoped (the
+    planner already operates within a single workspace; no user_id needed here
+    because the caller's run is already user-authenticated and same-workspace).
+    Backs the planner's get_run_todo tool."""
+    run = db.scalar(
+        select(QueryRun).where(
+            QueryRun.query_id == query_id,
+            QueryRun.workspace_id == workspace_id,
+        )
+    )
+    if run is None:
+        return None
+    return run.todo_md
+
+
+def get_run_artifacts_by_query_id(
+    db: Session, workspace_id: str, query_id: UUID
+) -> list[dict] | None:
+    """Return the raw stored produced_artifacts ({rel_path, content_b64, bytes,
+    task_id}) for a single prior run in this workspace, or None if the run
+    doesn't exist. Unlike get_run_produced_artifacts this is NOT user-scoped and
+    returns the RAW stored dicts (with content_b64) so the planner's
+    fetch_prior_artifact tool can decode and copy them into the current subdir.
+    Workspace scoping is sufficient — the planner only ever runs inside one
+    workspace it is already authorized for."""
+    run = db.scalar(
+        select(QueryRun).where(
+            QueryRun.query_id == query_id,
+            QueryRun.workspace_id == workspace_id,
+        )
+    )
+    if run is None:
+        return None
+    return list(run.produced_artifacts or [])
+
+
+def list_prior_artifact_manifest(
+    db: Session, workspace_id: str, exclude_query_id: UUID
+) -> list[dict]:
+    """Content-free manifest of every prior run's produced artifacts in this
+    workspace, newest run first, EXCLUDING the in-flight run. Each entry:
+    {query_id, run_started_at, task_id, rel_path, bytes}. No content_b64 — this
+    is the cheap 'what files exist across prior runs' listing the planner browses
+    before deciding what to fetch_prior_artifact. Mirrors the (run-scoped)
+    metadata the artifact download routes expose, but stripped of bytes."""
+    rows = db.scalars(
+        select(QueryRun)
+        .where(
+            QueryRun.workspace_id == workspace_id,
+            QueryRun.query_id != exclude_query_id,
+        )
+        .order_by(desc(QueryRun.started_at))
+    )
+    out: list[dict] = []
+    for run in rows:
+        for art in (run.produced_artifacts or []):
+            out.append({
+                "query_id": str(run.query_id),
+                "run_started_at": run.started_at.isoformat() if run.started_at else None,
+                "task_id": art.get("task_id"),
+                "rel_path": art.get("rel_path"),
+                "bytes": art.get("bytes"),
+            })
+    return out
+
+
 def get_latest_prior_run_artifacts(
     db: Session, workspace_id: str, exclude_query_id: UUID
 ) -> list[dict]:
