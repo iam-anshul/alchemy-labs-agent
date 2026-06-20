@@ -774,6 +774,11 @@ async def publish_todo_artifact(run: QueryRun, sink: EventSink, *, phase: str) -
         message="Plan file is ready",
         artifacts=[artifact],
     )
+    # Do NOT re-attach the artifact here. The UI groups a phase's events and
+    # unions their artifacts without de-duplication, so carrying the same
+    # todo.md on both the artifact_ready event (above) and this agent_ended
+    # event made every "Planning complete" show two identical todo.md chips.
+    # artifact_ready is the canonical delivery; agent_ended is the status signal.
     await planner_sink.publish_ui(
         "agent_ended",
         stage=phase,
@@ -784,7 +789,6 @@ async def publish_todo_artifact(run: QueryRun, sink: EventSink, *, phase: str) -
             "n_tasks": len(run.plan.tasks) if run.plan else 0,
             "needs_user_feedback": bool(run.plan and run.plan.needs_user_feedback),
         },
-        artifacts=[artifact],
     )
     
 # Terminal states for a Doc row's ingest pipeline (queued -> building_tree ->
