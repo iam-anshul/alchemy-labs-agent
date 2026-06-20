@@ -180,6 +180,25 @@ def _merge_plan(old: PlanOutput, new: PlanOutput) -> PlanOutput:
                 t.produced = old_t.produced
                 t.error = old_t.error
                 t.notes = old_t.notes
+
+    # Mark routed-around failures as superseded. When a replan recovers from a
+    # failed task by inserting a recovery sub-chain (e.g. t1 download failed ->
+    # add t3 search + t4 re-download, and re-point t2's deps onto t4), the dead
+    # task is left in the plan but NOTHING depends on it anymore. Left as
+    # 'failed' it would (1) poison the final run status — any failed task marks
+    # the whole run failed, so a fully-recovered run reads as failed — and (2)
+    # risk the upstream-failure sweep killing a downstream task that still
+    # happened to reference it. A failed task that no surviving task depends on
+    # has been abandoned by the replan; record that distinctly as 'superseded'.
+    # We only downgrade 'failed' (never completed/pending/dispatched), so a
+    # genuinely-blocking failure that downstream tasks still depend on stays
+    # 'failed' and keeps propagating.
+    depended_on: set[str] = set()
+    for t in new.tasks:
+        depended_on.update(t.deps)
+    for t in new.tasks:
+        if t.status == "failed" and t.id not in depended_on:
+            t.status = "superseded"
     return new
 
 
@@ -1265,7 +1284,9 @@ async def create_chat(
 
         # let's fore the tasks ony by one and not concurrently.
         while True:
-            if all(task.status == "completed" for task in thisRun.plan.tasks):
+            # 'superseded' is terminal-OK: a routed-around failed task is done
+            # with, so it does not keep the loop from recognizing completion.
+            if all(task.status in ("completed", "superseded") for task in thisRun.plan.tasks):
                 break
 
             ready = []
@@ -1313,6 +1334,11 @@ async def create_chat(
                 # No pending task can run — every remaining pending task is blocked
                 # by a failed upstream. Mark them and exit.
 
+                # Only genuinely-failed tasks block downstream work. A
+                # 'superseded' task was routed around by a replan and is NOT a
+                # real blocker — excluding it here prevents a downstream task
+                # (whose deps point at the recovery chain, not the dead task)
+                # from being wrongly force-failed.
                 failed_ids = {t.id for t in thisRun.plan.tasks if t.status == "failed"}
                 # Mark only tasks blocked by a failed ancestor; leave others for a replan pass.
                 progressed = False
@@ -1561,13 +1587,18 @@ async def create_chat(
         # status from the plan's tasks: any failed task → 'failed' overall,
         # otherwise 'completed'. If the plan never got built (planner crashed
         # on the initial call) we mark 'failed' with no todo_md.
+        #
+        # 'superseded' tasks are excluded from BOTH checks: a failure that a
+        # replan recovered from (routed around) must neither mark the run failed
+        # nor block it from being recognized as completed. A run whose only
+        # non-completed tasks are superseded is a successful recovery.
         final_status = "failed"
         final_todo: str | None = None
         if thisRun.plan is not None:
             final_todo = render_todo(thisRun)
             if any(t.status == "failed" for t in thisRun.plan.tasks):
                 final_status = "failed"
-            elif all(t.status == "completed" for t in thisRun.plan.tasks):
+            elif all(t.status in ("completed", "superseded") for t in thisRun.plan.tasks):
                 final_status = "completed"
             else:
                 # Mid-flight interruption — leave as 'failed' so future planner

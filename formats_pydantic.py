@@ -19,7 +19,13 @@ class TaskSpec(BaseModel):
     query: str
     expects: str
     produced: list[str] = Field(default_factory=list)
-    status: Literal["pending", "dispatched", "completed", "failed"] = "pending"
+    # "superseded": a previously-failed task that a replan routed AROUND — its
+    # downstream dependents were re-pointed onto a recovery chain, so the failed
+    # task is no longer part of the live plan. It is excluded from the failed-run
+    # determination and from upstream-failure propagation: a fully-recovered run
+    # must not be reported as failed just because a dead, routed-around task
+    # still sits in the plan. Set by _merge_plan, never by the planner.
+    status: Literal["pending", "dispatched", "completed", "failed", "superseded"] = "pending"
     notes: str = ""
     error: str = ""
     human_in_the_loop: bool = Field(

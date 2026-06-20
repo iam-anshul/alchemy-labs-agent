@@ -30,6 +30,11 @@ def render_task(task: TaskSpec) -> str:
             symbol = "[x]"
         case "failed":
             symbol = "[!]"
+        case "superseded":
+            # A failed task a replan routed around; shown struck-through-ish so
+            # the user sees it was abandoned in favor of a recovery path, not
+            # that the run failed.
+            symbol = "[-]"
 
     checkbox = symbol
     deps_str = ", ".join(getattr(d, "id", d) for d in task.deps) if task.deps else "none"
