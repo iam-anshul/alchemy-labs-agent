@@ -7,6 +7,7 @@ import mimetypes
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import logfire
 from api.events import EventSink, file_artifact
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -495,10 +496,23 @@ async def run_office_executor(
             user_prompt=task_prompt, deps=deps, usage_limits=usage_limits
         )
     except Exception as e:
+        error = f"Agent loop failed: {type(e).__name__}: {e}"
+        # The control loop surfaces only a short, user-safe "Office agent failed"
+        # message to the UI, and this branch (unlike the browser agent) doesn't
+        # publish the error itself — so without this log the real reason (model
+        # error, officecli crash, request-limit exhaustion, timeout) would be
+        # invisible server-side. Log it to Logfire so it's captured/searchable.
+        logfire.error(
+            "Office agent loop failed",
+            query=query,
+            expects=expects,
+            error_class=type(e).__name__,
+            error=error,
+        )
         return ExecutorResult(
             produced=[],
             notes="",
-            error=f"Agent loop failed: {type(e).__name__}: {e}",
+            error=error,
         )
 
     submission = run_result.output

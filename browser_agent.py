@@ -310,6 +310,16 @@ class BrowserExecutor:
                 )
         except Exception as e:
             error = self._format_run_exception(e)
+            # Same rationale as the no-submission branch below: surface the full
+            # error server-side in Logfire, since the UI message stays generic.
+            logfire.error(
+                "Browser agent run loop failed",
+                task_id=task_id,
+                attempt=attempt,
+                query=query,
+                error_class=type(e).__name__,
+                error=error,
+            )
             await sink.publish_ui(
                 "agent_ended",
                 stage="browsing",
@@ -345,6 +355,20 @@ class BrowserExecutor:
                 produced=[],
                 notes="",
                 error=detail,
+            )
+            # The UI 'message' is intentionally short/user-safe (per the event
+            # streaming contract), so the full diagnostic — final_result, step
+            # errors, validation message — would otherwise only live in the SSE
+            # data payload. Log it to Logfire so the real reason the browser
+            # agent failed to submit is captured server-side and searchable,
+            # not just shown as the generic "ended without submitting" line.
+            logfire.error(
+                "Browser agent ended without submitting",
+                task_id=task_id,
+                attempt=attempt,
+                query=query,
+                error_class=type(e).__name__,
+                failure_detail=detail,
             )
             await sink.publish_ui(
                 "agent_ended",
