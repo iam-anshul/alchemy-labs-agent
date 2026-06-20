@@ -13,3 +13,4 @@ file_system_root
 # Misc
 .git
 *.log
+.env
