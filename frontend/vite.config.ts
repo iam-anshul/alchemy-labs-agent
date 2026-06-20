@@ -24,7 +24,14 @@ export default defineConfig({
       // which React Router serves. Negative lookahead excludes /auth-ui*.
       "^/auth(?!-ui)": backendTarget,
       "/chat": backendTarget,
-      "/workspace": backendTarget,
+      // Backend API is mounted at the SINGULAR "/workspace/..." prefix, but the
+      // SPA's routes live under the PLURAL "/workspaces" (e.g. /workspaces,
+      // /workspaces/:id). A bare "/workspace" prefix rule matches by prefix and
+      // so greedily swallows "/workspaces*" too, proxying the UI route to the
+      // backend — which 404s with {"detail":"Not Found"} on a pasted URL or
+      // refresh. Anchor to "/workspace/" (and a bare "/workspace") so only the
+      // API is proxied; "/workspaces" never starts with "/workspace/".
+      "^/workspace(/|$)": backendTarget,
       "/v1": backendTarget,
       "/health": backendTarget,
     },
