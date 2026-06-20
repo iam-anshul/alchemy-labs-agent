@@ -1180,6 +1180,39 @@ async def create_chat(
             query_counter=query_counter
         )
 
+    # Persist a 'running' run row up front so the workspace "Recent runs" list
+    # shows this run while it is still in flight. Previously the row was only
+    # written when the first artifact landed (append_run_artifacts) or at the end
+    # (register_query_run, in finally) — so a still-planning run with no
+    # artifacts yet was invisible to anyone who navigated back to the workspace.
+    # Opening such a 'running' run from the list reconnects to its live SSE
+    # stream (RunPage streams when status=running), restoring the full live flow.
+    #
+    # register_query_run is an upsert keyed on query_id; the end-of-run call
+    # overwrites this same row with the final goal/workspace/todo/status. Every
+    # NOT NULL column already has a value on thisRun here; todo_md and
+    # produced_artifacts are nullable, so the running row inserts cleanly.
+    #
+    # Treated as REQUIRED: if this write fails we abort rather than run blind.
+    # We surface a clean run_ended/failed event and close the SSE channel before
+    # raising, so the failure reaches the UI instead of becoming a silent
+    # unhandled-task crash (this insert is OUTSIDE the main try/finally).
+    with SessionLocal() as db:
+        pre_insert_err = db_utils.register_query_run(db, run=thisRun, final_todo=None)
+    if pre_insert_err is not None:
+        await sink.publish_ui(
+            "run_ended",
+            stage="done",
+            status="failed",
+            message="Chat run failed",
+            data={"status": "failed", "error": f"could not persist the run: {pre_insert_err}"},
+        )
+        bus.close(f"query:{query_id}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write running run row to the database: {pre_insert_err}",
+        )
+
     # Start the doc-reasoner ingest workers BEFORE the planner runs. They drain
     # the asyncio queue that ingest_local_file pushes onto, so PDFs uploaded
     # via the doc agent's ingest_documents tool actually get parsed and indexed

@@ -35,6 +35,12 @@ export default function WorkspacePage() {
       return { documents, runs, outputs };
     },
     [decodedWorkspaceId],
+    // Silently refresh every 5s so a run started elsewhere (e.g. the user
+    // navigated back from a chat that is still in flight) appears in "Recent
+    // runs", and a running run flips to completed/failed, without a manual
+    // reload. Also keeps the document/output lists current (e.g. an upload
+    // finishing ingestion).
+    5000,
   );
 
   async function handleStartRun() {
