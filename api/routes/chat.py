@@ -881,6 +881,38 @@ async def ingest_dep_pdfs(
     return ready_ids
 
 
+def _format_doc_ask_notes(doc_ask_result) -> str:
+    """Render a document_answering ASK result as human-readable task notes.
+
+    The notes string is user-facing (it shows on the task card) AND feeds the
+    planner's next decisions, so it must not leak raw Pydantic reprs like
+    `PageTarget(doc_id='...', start_page=1, ...)` / `Citation(...)`. We surface
+    the confidence, a compact 'title pp.X-Y' citation list, and a short
+    page-range summary, dropping the verbose internal `reason` fields.
+    """
+    parts: list[str] = [f"Confidence: {doc_ask_result.confidence}."]
+
+    citations = doc_ask_result.citations or []
+    if citations:
+        cite_strs = [
+            f"{c.doc_title} p.{c.pages}" if c.pages else f"{c.doc_title}"
+            for c in citations
+        ]
+        parts.append("Sources: " + "; ".join(cite_strs) + ".")
+
+    page_targets = doc_ask_result.page_targets or []
+    if page_targets:
+        # Compact per-doc page ranges (e.g. "pp.1-15"); single page -> "p.8".
+        range_strs = [
+            f"pp.{p.start_page}-{p.end_page}" if p.start_page != p.end_page
+            else f"p.{p.start_page}"
+            for p in page_targets
+        ]
+        parts.append("Pages read: " + ", ".join(range_strs) + ".")
+
+    return " ".join(parts)
+
+
 async def dispatch_executor_agent(
     task_spec: TaskSpec,
     dep_files: list[str],
@@ -996,7 +1028,7 @@ async def dispatch_executor_agent(
                 )
                 return ExecutorResult(
                     produced=[str(Path(doc_ask_result.output_path).relative_to(subdir_path))],
-                    notes=f"Page targets: {doc_ask_result.page_targets} with confidence: {doc_ask_result.confidence} \n citations: {doc_ask_result.citations}"
+                    notes=_format_doc_ask_notes(doc_ask_result),
                 )
 
             else:  # doc_answering_mode == "REPORT" (guarded above to ASK | REPORT)
@@ -1043,6 +1075,7 @@ async def dispatch_executor_agent(
                 },
             )
             return web_result
+        
 def validate_files_exist(workspace: Path | str, produced: list[str]) -> tuple[bool, str]:
     """Verify each produced path exists under the workspace and is non-empty.
 
