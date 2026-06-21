@@ -1,6 +1,6 @@
 # Import first so Logfire is configured and pydantic-ai is instrumented before
 # any agent modules (imported transitively via the routers) are loaded.
-import observability  # noqa: F401
+import app.core.observability as observability  # noqa: F401
 
 from fastapi import FastAPI
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -13,10 +13,10 @@ from supertokens_python import init, InputAppInfo, SupertokensConfig, get_all_co
 from supertokens_python.framework.fastapi import get_middleware
 from supertokens_python.recipe import session, emailpassword
 
-from api.routes.chat import chat_router
-from api.routes.workspace import workspace_router
-from api.routes.documents import document_router
-from api import ingest
+from app.api.routes.chat import chat_router
+from app.api.routes.workspace import workspace_router
+from app.api.routes.documents import document_router
+from app.api import ingest
 
 from contextlib import asynccontextmanager
 

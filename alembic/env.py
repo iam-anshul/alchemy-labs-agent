@@ -7,8 +7,8 @@ from alembic import context
 
 from dotenv import load_dotenv
 import os
-from db.base import Base
-import db.models.models
+from app.db.base import Base
+import app.db.models.models  # noqa: F401  (side-effect: register models on Base.metadata)
 
 load_dotenv()
 

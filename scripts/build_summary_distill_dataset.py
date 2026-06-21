@@ -105,8 +105,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from openai import AsyncOpenAI  # noqa: E402
 
-from config import get_settings  # noqa: E402
-from tree import (  # noqa: E402
+from app.core.config import get_settings  # noqa: E402
+from app.ingestion.tree import (  # noqa: E402
     _Node,
     _bucket_pages,
     _count_tokens,

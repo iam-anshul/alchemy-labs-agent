@@ -1,25 +1,25 @@
 # Import first so Logfire is configured and pydantic-ai is instrumented before
 # any agent modules (orchestrator, agent, report, office_agent) are loaded.
-import observability  # noqa: F401
+import app.core.observability as observability  # noqa: F401
 
 import os
 import uuid
 from pathlib import Path
-from orchestrator import plannerAgent
-from browser_agent import BrowserExecutor
-from office_agent import run_office_executor
-from api.ingest import start_workers, shutdown_workers
-from db import SessionLocal
-from db import utils as db_utils
-from formats_pydantic import Run, PlanOutput, TaskSpec
-from render_todo import render_todo
+from app.agents.orchestrator import plannerAgent
+from app.agents.browser_agent import BrowserExecutor
+from app.agents.office_agent import run_office_executor
+from app.api.ingest import start_workers, shutdown_workers
+from app.db import SessionLocal
+from app.db import utils as db_utils
+from app.schemas.formats_pydantic import Run, PlanOutput, TaskSpec
+from app.rendering.render_todo import render_todo
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart, TextPart
 from time import time
 import asyncio
 import shutil
 
-from report import draft_report
-from agent import answer_query
+from app.agents.report import draft_report
+from app.agents.agent import answer_query
 
 from dotenv import load_dotenv
 import os

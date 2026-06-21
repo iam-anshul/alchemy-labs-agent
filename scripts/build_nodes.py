@@ -11,10 +11,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import select  # noqa: E402
 
-from db import SessionLocal, utils  # noqa: E402
-from db.models import Doc, Node  # noqa: E402
-from shared import setup_logging  # noqa: E402
-from tree import build_tree  # noqa: E402
+from app.db import SessionLocal, utils  # noqa: E402
+from app.db.models import Doc, Node  # noqa: E402
+from app.core.shared import setup_logging  # noqa: E402
+from app.ingestion.tree import build_tree  # noqa: E402
 
 
 async def main() -> None:
