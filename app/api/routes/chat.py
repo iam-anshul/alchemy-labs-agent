@@ -783,7 +783,7 @@ async def publish_todo_artifact(run: QueryRun, sink: EventSink, *, phase: str) -
         "agent_ended",
         stage=phase,
         status="completed",
-        message="Planning complete",
+        message="planning" if phase == "planning" else "replanning",
         data={
             "phase": phase,
             "n_tasks": len(run.plan.tasks) if run.plan else 0,
